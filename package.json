@@ -13,7 +13,7 @@
     "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "three": "0.178.0",
+     "three": "0.178.0",
     "@sparkjsdev/spark": "0.1.10"
   },
  "devDependencies": {
