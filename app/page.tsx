@@ -91,12 +91,13 @@ export default function Home() {
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // Spark via CDN
-      // NEW (works)
-const spark = await import(
-  /* webpackIgnore: true */
-  "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
-);
+           // Spark via CDN (TS will complain about URL modules; we suppress that line)
+      // @ts-expect-error - URL module import has no TS declarations
+      const spark = await import(
+        /* webpackIgnore: true */
+        "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
+      );
+      const { SplatMesh } = spark as any;
 const { SplatMesh } = spark as any;
 
       if (disposed || !mountRef.current) return;
