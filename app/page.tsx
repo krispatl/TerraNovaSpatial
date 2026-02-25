@@ -2,243 +2,128 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Operation = {
-  operation_id: string;
-  done?: boolean;
-  error?: any;
-  metadata?: any;
-  response?: any;
-};
-
-type World = {
-  world_id: string;
-  world_marble_url?: string;
-  display_name?: string;
-  assets?: any;
-  [k: string]: any;
-};
-
-async function sleep(ms: number) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
-function findUrlsDeep(obj: any, exts: string[]): string[] {
-  const out: string[] = [];
-  const seen = new Set<any>();
-  const extsLower = exts.map((e) => e.toLowerCase());
-
-  function walk(x: any) {
-    if (!x || typeof x !== "object") return;
-    if (seen.has(x)) return;
-    seen.add(x);
-
-    if (Array.isArray(x)) {
-      for (const v of x) walk(v);
-      return;
-    }
-
-    for (const k of Object.keys(x)) {
-      const v = x[k];
-      if (typeof v === "string") {
-        const s = v.toLowerCase();
-        if (extsLower.some((e) => s.includes(e))) out.push(v);
-      } else if (typeof v === "object") {
-        walk(v);
-      }
-    }
-  }
-
-  walk(obj);
-  return Array.from(new Set(out));
-}
-
-function pickBestUrl(urls: string[]): string {
-  if (!urls.length) return "";
-  // If World Labs returns multiple .spz variants, you can enhance this later.
-  return urls[0];
-}
-
 export default function Home() {
   const mountRef = useRef<HTMLDivElement | null>(null);
-  const runtimeRef = useRef<any>(null);
 
   const [prompt, setPrompt] = useState(
-    "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, distant crowds, cinematic lighting."
+    "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, cinematic lighting."
   );
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Idle.");
-  const [error, setError] = useState<string | null>(null);
-  const [debugOp, setDebugOp] = useState<any>(null);
-  const [debugWorld, setDebugWorld] = useState<any>(null);
 
-  // =============================
-  // VIEWER BOOT
-  // =============================
   useEffect(() => {
     if (!mountRef.current) return;
 
-    let disposed = false;
+    // Inject import map once
+    if (!document.getElementById("three-importmap")) {
+      const script = document.createElement("script");
+      script.type = "importmap";
+      script.id = "three-importmap";
+      script.textContent = JSON.stringify({
+        imports: {
+          three: "https://unpkg.com/three@0.178.0/build/three.module.js",
+          "three/examples/jsm/":
+            "https://unpkg.com/three@0.178.0/examples/jsm/",
+        },
+      });
+      document.head.appendChild(script);
+    }
 
     async function boot() {
       const THREE = await import("three");
-      const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
+      const { VRButton } = await import(
+        "three/examples/jsm/webxr/VRButton.js"
+      );
 
-      // ---- Spark via CDN, WITHOUT TS trying to resolve the URL module ----
-      // TS complains when the URL is a literal inside import(). So we import via a runtime function.
-      const sparkUrl = "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js";
-      const dynamicImport = new Function("u", "return import(u)") as (u: string) => Promise<any>;
-      const spark = await dynamicImport(sparkUrl);
+      const spark = await import(
+        "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
+      );
+
       const SplatMesh = spark.SplatMesh;
-
-      if (disposed || !mountRef.current) return;
 
       const scene = new THREE.Scene();
 
-      const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.05, 2000);
+      const camera = new THREE.PerspectiveCamera(
+        65,
+        window.innerWidth / window.innerHeight,
+        0.05,
+        2000
+      );
       camera.position.set(0, 1.6, 2.2);
 
       const renderer = new THREE.WebGLRenderer({
         antialias: true,
-        powerPreference: "high-performance",
       });
 
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
 
-      mountRef.current.appendChild(renderer.domElement);
+      mountRef.current!.appendChild(renderer.domElement);
       document.body.appendChild(VRButton.createButton(renderer));
 
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
 
       let splat: any = null;
 
-      async function loadWorldAssets(w: World) {
-        const spzCandidates = findUrlsDeep(w, [".spz"]);
-        const spzUrl = pickBestUrl(spzCandidates);
-
-        if (!spzUrl) {
-          console.log("World JSON (no .spz):", w);
-          throw new Error("No .spz URL found in world payload.");
-        }
+      async function loadWorld(world: any) {
+        const spz = JSON.stringify(world).match(/https:\/\/[^"]+\.spz/);
+        if (!spz) throw new Error("No .spz found.");
 
         if (splat) scene.remove(splat);
-
-        splat = new SplatMesh({ url: spzUrl });
+        splat = new SplatMesh({ url: spz[0] });
         scene.add(splat);
-
-        camera.position.set(0, 1.6, 2.2);
       }
-
-      function onResize() {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-      }
-      window.addEventListener("resize", onResize);
 
       renderer.setAnimationLoop(() => {
         renderer.render(scene, camera);
       });
 
-      runtimeRef.current = {
-        loadWorldAssets,
-        dispose() {
-          window.removeEventListener("resize", onResize);
-          renderer.setAnimationLoop(null as any);
-          renderer.dispose();
-          if (renderer.domElement?.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
-          const vrBtn = document.getElementById("VRButton");
-          if (vrBtn?.parentNode) vrBtn.parentNode.removeChild(vrBtn);
-        },
-      };
+      (window as any).loadWorldAssets = loadWorld;
     }
 
-    boot().catch((e) => {
-      console.error(e);
-      setError(String(e?.message || e));
-      setStatus("Viewer failed to boot.");
-    });
-
-    return () => {
-      disposed = true;
-      try {
-        runtimeRef.current?.dispose?.();
-      } catch {}
-      runtimeRef.current = null;
-    };
+    boot();
   }, []);
-
-  // =============================
-  // GENERATION FLOW
-  // =============================
-
-  async function waitForWorldId(operationId: string) {
-    while (true) {
-      const r = await fetch(`/api/operations/${operationId}`, { cache: "no-store" });
-      const op = (await r.json()) as Operation;
-      setDebugOp(op);
-
-      const wid = op?.metadata?.world_id;
-      if (wid) return wid as string;
-
-      setStatus(op?.metadata?.progress?.description || "World generation in progress");
-      await sleep(2000);
-    }
-  }
-
-  async function waitForSpz(worldId: string) {
-    while (true) {
-      const r = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
-      const w = (await r.json()) as World;
-      setDebugWorld(w);
-
-      const spz = findUrlsDeep(w, [".spz"]);
-      if (spz.length) return w;
-
-      setStatus("World exists. Waiting for splats…");
-      await sleep(3000);
-    }
-  }
 
   async function generate() {
     setBusy(true);
-    setError(null);
-    setStatus("Starting generation…");
-    setDebugOp(null);
-    setDebugWorld(null);
+    setStatus("Starting…");
 
-    try {
-      const r = await fetch("/api/worlds/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: prompt.trim(), model: "Marble 0.1-plus" }),
-      });
+    const r = await fetch("/api/worlds/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: prompt }),
+    });
 
-      const gen = await r.json();
-      if (!r.ok) throw new Error(gen?.error || "Generate failed.");
+    const gen = await r.json();
 
-      const operationId = gen.operation_id as string;
-      if (!operationId) throw new Error("No operation_id returned.");
+    const opId = gen.operation_id;
 
-      setStatus("Waiting for world_id…");
-      const wid = await waitForWorldId(operationId);
+    while (true) {
+      const op = await fetch(`/api/operations/${opId}`, {
+        cache: "no-store",
+      }).then((r) => r.json());
 
-      setStatus("Waiting for splats…");
-      const w = await waitForSpz(wid);
+      if (op.metadata?.world_id) {
+        const worldId = op.metadata.world_id;
 
-      setStatus("Loading viewer…");
-      const rt = runtimeRef.current;
-      if (!rt?.loadWorldAssets) throw new Error("Viewer not ready.");
-      await rt.loadWorldAssets(w);
+        while (true) {
+          const world = await fetch(`/api/worlds/${worldId}`, {
+            cache: "no-store",
+          }).then((r) => r.json());
 
-      setStatus("Ready. Enter VR.");
-    } catch (e: any) {
-      console.error(e);
-      setError(e?.message || String(e));
-      setStatus("Failed.");
-    } finally {
-      setBusy(false);
+          if (JSON.stringify(world).includes(".spz")) {
+            setStatus("Loading…");
+            await (window as any).loadWorldAssets(world);
+            setStatus("Ready.");
+            setBusy(false);
+            return;
+          }
+
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
 
@@ -251,7 +136,7 @@ export default function Home() {
           position: "absolute",
           top: 20,
           left: 20,
-          width: 440,
+          width: 420,
           background: "rgba(0,0,0,0.75)",
           padding: 16,
           borderRadius: 12,
@@ -261,21 +146,18 @@ export default function Home() {
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          style={{ width: "100%", height: 86 }}
+          style={{ width: "100%", height: 80 }}
         />
-        <button onClick={generate} disabled={busy || !prompt.trim()} style={{ marginTop: 10, width: "100%" }}>
+
+        <button
+          onClick={generate}
+          disabled={busy}
+          style={{ marginTop: 10, width: "100%" }}
+        >
           {busy ? "Working…" : "Generate"}
         </button>
 
         <div style={{ marginTop: 10 }}>Status: {status}</div>
-        {error && <div style={{ color: "#ff6b6b", marginTop: 8 }}>{error}</div>}
-
-        <details style={{ marginTop: 10 }}>
-          <summary>Debug</summary>
-          <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>
-            {JSON.stringify({ lastOperation: debugOp, lastWorld: debugWorld }, null, 2)}
-          </pre>
-        </details>
       </div>
     </>
   );
