@@ -62,7 +62,7 @@ export default function Home() {
   const runtimeRef = useRef<any>(null);
 
   const [prompt, setPrompt] = useState(
-    "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, cinematic lighting."
+    "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, distant crowds, cinematic lighting."
   );
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Idle.");
@@ -81,14 +81,13 @@ export default function Home() {
     async function boot() {
       const THREE = await import("three");
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
-      const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // @ts-expect-error - remote URL module
+      // Spark via CDN
+      // @ts-ignore - remote URL module has no TS types
       const spark = await import(
         /* webpackIgnore: true */
         "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
       );
-
       const SplatMesh = (spark as any).SplatMesh;
 
       if (disposed || !mountRef.current) return;
@@ -115,14 +114,8 @@ export default function Home() {
       mountRef.current.appendChild(renderer.domElement);
       document.body.appendChild(VRButton.createButton(renderer));
 
-      const rig = new THREE.Group();
-      rig.add(camera);
-      scene.add(rig);
-
+      // simple lighting
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
-      scene.add(new THREE.GridHelper(12, 24));
-
-      const gltfLoader = new GLTFLoader();
 
       let splat: any = null;
 
@@ -140,10 +133,15 @@ export default function Home() {
         splat = new SplatMesh({ url: spzUrl });
         scene.add(splat);
 
-        rig.position.set(0, 0, 2.5);
+        camera.position.set(0, 1.6, 2.2);
       }
 
-      const clock = new THREE.Clock();
+      function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+      window.addEventListener("resize", onResize);
 
       renderer.setAnimationLoop(() => {
         renderer.render(scene, camera);
@@ -152,8 +150,14 @@ export default function Home() {
       runtimeRef.current = {
         loadWorldAssets,
         dispose() {
+          window.removeEventListener("resize", onResize);
           renderer.setAnimationLoop(null as any);
           renderer.dispose();
+          if (renderer.domElement?.parentNode) {
+            renderer.domElement.parentNode.removeChild(renderer.domElement);
+          }
+          const vrBtn = document.getElementById("VRButton");
+          if (vrBtn?.parentNode) vrBtn.parentNode.removeChild(vrBtn);
         },
       };
     }
@@ -165,7 +169,9 @@ export default function Home() {
 
     return () => {
       disposed = true;
-      runtimeRef.current?.dispose?.();
+      try {
+        runtimeRef.current?.dispose?.();
+      } catch {}
       runtimeRef.current = null;
     };
   }, []);
@@ -176,32 +182,28 @@ export default function Home() {
 
   async function waitForWorldId(operationId: string) {
     while (true) {
-      const r = await fetch(`/api/operations/${operationId}`, {
-        cache: "no-store",
-      });
-
+      const r = await fetch(`/api/operations/${operationId}`, { cache: "no-store" });
       const op = (await r.json()) as Operation;
       setDebugOp(op);
 
       const wid = op?.metadata?.world_id;
       if (wid) return wid;
 
+      setStatus(op?.metadata?.progress?.description || "World generation in progress");
       await sleep(2000);
     }
   }
 
   async function waitForSpz(worldId: string) {
     while (true) {
-      const r = await fetch(`/api/worlds/${worldId}`, {
-        cache: "no-store",
-      });
-
+      const r = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
       const w = (await r.json()) as World;
       setDebugWorld(w);
 
       const spz = findUrlsDeep(w, [".spz"]);
       if (spz.length) return w;
 
+      setStatus("World exists. Waiting for splats…");
       await sleep(3000);
     }
   }
@@ -210,6 +212,8 @@ export default function Home() {
     setBusy(true);
     setError(null);
     setStatus("Starting generation…");
+    setDebugOp(null);
+    setDebugWorld(null);
 
     try {
       const r = await fetch("/api/worlds/generate", {
@@ -221,23 +225,23 @@ export default function Home() {
       const gen = await r.json();
       if (!r.ok) throw new Error(gen?.error || "Generate failed.");
 
-      const operationId = gen.operation_id;
+      const operationId = gen.operation_id as string;
+      if (!operationId) throw new Error("No operation_id returned.");
+
       setStatus("Waiting for world_id…");
-
       const wid = await waitForWorldId(operationId);
-      setStatus("Waiting for splats…");
 
+      setStatus("Waiting for splats…");
       const w = await waitForSpz(wid);
 
       setStatus("Loading viewer…");
-
       const rt = runtimeRef.current;
       if (!rt?.loadWorldAssets) throw new Error("Viewer not ready.");
-
       await rt.loadWorldAssets(w);
 
       setStatus("Ready. Enter VR.");
     } catch (e: any) {
+      console.error(e);
       setError(e?.message || String(e));
       setStatus("Failed.");
     } finally {
@@ -268,23 +272,19 @@ export default function Home() {
         />
         <button
           onClick={generate}
-          disabled={busy}
+          disabled={busy || !prompt.trim()}
           style={{ marginTop: 10, width: "100%" }}
         >
           {busy ? "Working…" : "Generate"}
         </button>
 
         <div style={{ marginTop: 10 }}>Status: {status}</div>
-        {error && <div style={{ color: "red" }}>{error}</div>}
+        {error && <div style={{ color: "red", marginTop: 8 }}>{error}</div>}
 
         <details style={{ marginTop: 10 }}>
           <summary>Debug</summary>
-          <pre style={{ fontSize: 11 }}>
-            {JSON.stringify(
-              { lastOperation: debugOp, lastWorld: debugWorld },
-              null,
-              2
-            )}
+          <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 220, overflow: "auto" }}>
+            {JSON.stringify({ lastOperation: debugOp, lastWorld: debugWorld }, null, 2)}
           </pre>
         </details>
       </div>
