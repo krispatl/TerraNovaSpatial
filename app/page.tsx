@@ -2,25 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type WorldAssets = {
-  imagery?: { pano_url?: string };
-  mesh?: { collider_mesh_url?: string };
-  splats?: any;
-  thumbnail_url?: string;
-  caption?: string;
-};
-
 type World = {
   world_id: string;
   display_name?: string;
   world_marble_url?: string;
-  assets?: WorldAssets;
+  assets?: any;
   [k: string]: any;
 };
 
-function findSpzUrlsDeep(obj: any): string[] {
+function findUrlsDeep(obj: any, exts: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<any>();
+  const extsLower = exts.map((e) => e.toLowerCase());
 
   function walk(x: any) {
     if (!x || typeof x !== "object") return;
@@ -34,8 +27,12 @@ function findSpzUrlsDeep(obj: any): string[] {
 
     for (const k of Object.keys(x)) {
       const v = x[k];
-      if (typeof v === "string" && v.toLowerCase().includes(".spz")) out.push(v);
-      else if (typeof v === "object") walk(v);
+      if (typeof v === "string") {
+        const s = v.toLowerCase();
+        if (extsLower.some((e) => s.includes(e))) out.push(v);
+      } else if (typeof v === "object") {
+        walk(v);
+      }
     }
   }
 
@@ -45,6 +42,7 @@ function findSpzUrlsDeep(obj: any): string[] {
 
 function pickBestUrl(urls: string[]): string {
   if (!urls.length) return "";
+  // crude heuristic: prefer urls that include higher-detail tokens
   const prefs = ["10m", "5m", "2m", "1m", "500k", "300k", "200k", "100k", "50k"];
   const lower = urls.map((u) => u.toLowerCase());
   for (const p of prefs) {
@@ -52,6 +50,10 @@ function pickBestUrl(urls: string[]): string {
     if (idx >= 0) return urls[idx];
   }
   return urls[0];
+}
+
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
 }
 
 export default function Home() {
@@ -76,12 +78,8 @@ export default function Home() {
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // Load Spark from CDN so Next/Vercel doesn't try to bundle it.
-      // IMPORTANT: do NOT externalize "three" here (no ?external=three),
-      // otherwise the browser can't resolve bare specifier "three".
-      const spark = await import(
-        /* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10"
-      );
+      // Spark via CDN so Vercel/Next doesn’t bundle it.
+      const spark = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
       const SplatMesh = (spark as any).SplatMesh;
 
       if (disposed || !mountRef.current) return;
@@ -103,13 +101,13 @@ export default function Home() {
       rig.add(camera);
       scene.add(rig);
 
-      // Lighting
+      // lighting
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.9));
       const dir = new THREE.DirectionalLight(0xffffff, 0.55);
       dir.position.set(3, 6, 2);
       scene.add(dir);
 
-      // Grid + floor fallback
+      // grid + fallback floor
       const grid = new THREE.GridHelper(12, 24, 0x334455, 0x223344);
       (grid.material as any).transparent = true;
       (grid.material as any).opacity = 0.25;
@@ -125,7 +123,7 @@ export default function Home() {
 
       const gltfLoader = new GLTFLoader();
 
-      // Collider mesh grounding
+      // collider grounding
       let colliderRoot: any = null;
       let colliderMeshes: any[] = [];
 
@@ -141,20 +139,16 @@ export default function Home() {
 
       function groundRig() {
         if (!colliderMeshes.length) return;
-
         tmpVec.copy(rig.position);
         tmpVec.y += 3.0;
-
         downRay.set(tmpVec, new THREE.Vector3(0, -1, 0));
         downRay.far = 20;
-
         const hits = downRay.intersectObjects(colliderMeshes, true);
         if (!hits.length) return;
-
         rig.position.y = hits[0].point.y;
       }
 
-      // Smooth locomotion (thumbstick)
+      // locomotion
       const speed = 1.8;
       const clock = new THREE.Clock();
 
@@ -202,23 +196,21 @@ export default function Home() {
         rig.position.addScaledVector(forward, -mz * speed * dt);
       }
 
-      // Active world objects
       let splat: any = null;
 
       async function loadWorldAssets(w: World) {
         const assets = w.assets || {};
-        const panoUrl = assets.imagery?.pano_url;
-        const meshUrl = assets.mesh?.collider_mesh_url;
+        const panoUrl = assets?.imagery?.pano_url;
+        const meshUrl = assets?.mesh?.collider_mesh_url;
 
-        // Find SPZ urls anywhere (schema-proof)
-        const spzCandidates = findSpzUrlsDeep(w);
+        // Find a .spz anywhere in the world JSON
+        const spzCandidates = findUrlsDeep(w, [".spz"]);
         if (!spzCandidates.length) {
           console.log("World JSON (no .spz found):", w);
           throw new Error("No .spz URL found anywhere in world JSON.");
         }
         const spzUrl = pickBestUrl(spzCandidates);
 
-        // Pano background
         if (panoUrl) {
           const tex = await new THREE.TextureLoader().loadAsync(panoUrl);
           tex.mapping = THREE.EquirectangularReflectionMapping;
@@ -226,7 +218,6 @@ export default function Home() {
           scene.background = tex;
         }
 
-        // Collider mesh
         if (meshUrl) {
           const gltf = await gltfLoader.loadAsync(meshUrl);
           if (colliderRoot) scene.remove(colliderRoot);
@@ -243,7 +234,6 @@ export default function Home() {
           collectColliderMeshes(colliderRoot);
         }
 
-        // SPZ splats
         if (splat) scene.remove(splat);
         splat = new (SplatMesh as any)({ url: spzUrl });
         scene.add(splat);
@@ -272,7 +262,6 @@ export default function Home() {
           window.removeEventListener("resize", onResize);
           renderer.setAnimationLoop(null as any);
           renderer.dispose();
-
           if (renderer.domElement?.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
           const vrBtn = document.getElementById("VRButton");
           if (vrBtn?.parentNode) vrBtn.parentNode.removeChild(vrBtn);
@@ -294,6 +283,38 @@ export default function Home() {
     };
   }, []);
 
+  async function waitForWorldWithSplats(worldId: string) {
+    const started = Date.now();
+    const MAX_MS = 8 * 60 * 1000; // splats can take time
+    let attempt = 0;
+
+    while (true) {
+      const wRes = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
+      const w = await wRes.json();
+      if (!wRes.ok) throw new Error(w?.error || "Failed to fetch world.");
+
+      // Do we have a .spz anywhere yet?
+      const spz = findUrlsDeep(w, [".spz"]);
+      if (spz.length) return w as World;
+
+      // Still baking
+      const msg =
+        w?.assets?.splats?.progress?.description ||
+        w?.status ||
+        "Waiting for splats to finish…";
+      setStatus(typeof msg === "string" ? msg : "Waiting for splats to finish…");
+
+      if (Date.now() - started > MAX_MS) {
+        console.log("World JSON (timed out waiting for .spz):", w);
+        throw new Error("Timed out waiting for .spz splat URLs to appear in world JSON.");
+      }
+
+      const delay = Math.min(2000 + attempt * 400, 7000);
+      attempt++;
+      await sleep(delay);
+    }
+  }
+
   async function generate() {
     setBusy(true);
     setError(null);
@@ -312,9 +333,7 @@ export default function Home() {
       const opId = gen.operation_id as string;
       if (!opId) throw new Error("No operation_id returned.");
 
-      setStatus(`Generating… (operation ${opId.slice(0, 8)}…)`);
-
-      // Poll operation until we get world_id in metadata
+      // Poll operation until we have world_id
       const started = Date.now();
       const MAX_MS = 6 * 60 * 1000;
       let attempt = 0;
@@ -322,7 +341,7 @@ export default function Home() {
 
       while (!worldId) {
         const delay = Math.min(1500 + attempt * 300, 6000);
-        await new Promise((res) => setTimeout(res, delay));
+        await sleep(delay);
         attempt++;
 
         const opRes = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
@@ -331,24 +350,17 @@ export default function Home() {
         if (!opRes.ok) throw new Error(op?.error || "Operation polling failed.");
         if (op?.error?.message) throw new Error(op.error.message);
 
-        const statusText =
-          op?.metadata?.progress?.description ||
-          op?.metadata?.progress?.status ||
-          "World generation in progress";
+        setStatus(op?.metadata?.progress?.description || op?.metadata?.progress?.status || "Generating…");
 
-        setStatus(statusText);
+        worldId = op?.metadata?.world_id || null;
 
-        worldId = op?.metadata?.world_id || op?.metadata?.worldId || null;
-
-        if (Date.now() - started > MAX_MS) {
-          throw new Error("Timed out waiting for world_id from operation.");
-        }
+        if (Date.now() - started > MAX_MS) throw new Error("Timed out waiting for world_id from operation.");
       }
 
-      // Fetch full world snapshot
-      const wRes = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
-      const wFull = await wRes.json();
-      if (!wRes.ok) throw new Error(wFull?.error || "Failed to fetch world.");
+      setStatus("World created. Waiting for splats…");
+
+      // ✅ NEW: wait until splats exist
+      const wFull = await waitForWorldWithSplats(worldId);
 
       setWorld(wFull);
       setStatus("Loading assets into WebXR viewer…");
@@ -370,16 +382,10 @@ export default function Home() {
   return (
     <>
       <div className="canvasWrap" ref={mountRef} />
-
       <div className="ui">
         <div className="panel">
           <div className="row">
-            <textarea
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe a location…"
-              spellCheck={false}
-            />
+            <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder="Describe a location…" />
             <button className="btn" onClick={generate} disabled={busy || !prompt.trim()}>
               {busy ? "Working…" : "Generate"}
             </button>
@@ -389,17 +395,9 @@ export default function Home() {
             <div className="pill">
               <span style={{ color: "var(--muted)" }}>Status:</span> {status}
             </div>
-
             {world?.world_id ? (
               <div className="pill">
-                <span style={{ color: "var(--muted)" }}>World:</span>{" "}
-                {world.world_marble_url ? (
-                  <a href={world.world_marble_url} target="_blank" rel="noreferrer">
-                    {world.world_id.slice(0, 8)}…
-                  </a>
-                ) : (
-                  <span>{world.world_id.slice(0, 8)}…</span>
-                )}
+                <span style={{ color: "var(--muted)" }}>World:</span> {world.world_id.slice(0, 8)}…
               </div>
             ) : null}
           </div>
@@ -408,9 +406,7 @@ export default function Home() {
             <div className="hint statusBad">{error}</div>
           ) : (
             <div className="hint">
-              Quest: open this site in Quest Browser, click <b>ENTER VR</b>, then Generate.
-              <br />
-              Movement: thumbstick (smooth locomotion).
+              Quest: open in Quest Browser, click <b>ENTER VR</b>, then Generate. Movement: thumbstick.
             </div>
           )}
         </div>
