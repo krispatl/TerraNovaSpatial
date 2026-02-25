@@ -92,8 +92,12 @@ export default function Home() {
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
       // Spark via CDN
-      const spark = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
-      const SplatMesh = (spark as any).SplatMesh;
+      // NEW (works)
+const spark = await import(
+  /* webpackIgnore: true */
+  "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
+);
+const { SplatMesh } = spark as any;
 
       if (disposed || !mountRef.current) return;
 
