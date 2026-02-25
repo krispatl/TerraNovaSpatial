@@ -65,7 +65,7 @@ export default function Home() {
       const THREE = await import("three");
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
-      const { SplatMesh } = await import("@sparkjsdev/spark");
+      const { SplatMesh } = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
 
       if (disposed || !mountRef.current) return;
 
