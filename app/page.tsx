@@ -45,7 +45,6 @@ function findSpzUrlsDeep(obj: any): string[] {
 
 function pickBestUrl(urls: string[]): string {
   if (!urls.length) return "";
-  // Heuristic: prefer urls that include higher-res tokens
   const prefs = ["10m", "5m", "2m", "1m", "500k", "300k", "200k", "100k", "50k"];
   const lower = urls.map((u) => u.toLowerCase());
   for (const p of prefs) {
@@ -77,11 +76,11 @@ export default function Home() {
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // IMPORTANT:
-      // - Load Spark from CDN so Next/Vercel doesn't bundle it.
-      // - external=three prevents Spark's CDN bundle from pulling a second copy of three.js.
+      // Load Spark from CDN so Next/Vercel doesn't try to bundle it.
+      // IMPORTANT: do NOT externalize "three" here (no ?external=three),
+      // otherwise the browser can't resolve bare specifier "three".
       const spark = await import(
-        /* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10?external=three"
+        /* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10"
       );
       const SplatMesh = (spark as any).SplatMesh;
 
@@ -104,13 +103,13 @@ export default function Home() {
       rig.add(camera);
       scene.add(rig);
 
-      // Lighting (mesh needs it; splats generally don't)
+      // Lighting
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.9));
       const dir = new THREE.DirectionalLight(0xffffff, 0.55);
       dir.position.set(3, 6, 2);
       scene.add(dir);
 
-      // Grid + floor (fallback)
+      // Grid + floor fallback
       const grid = new THREE.GridHelper(12, 24, 0x334455, 0x223344);
       (grid.material as any).transparent = true;
       (grid.material as any).opacity = 0.25;
@@ -126,7 +125,7 @@ export default function Home() {
 
       const gltfLoader = new GLTFLoader();
 
-      // Collider mesh (for grounding)
+      // Collider mesh grounding
       let colliderRoot: any = null;
       let colliderMeshes: any[] = [];
 
@@ -211,7 +210,7 @@ export default function Home() {
         const panoUrl = assets.imagery?.pano_url;
         const meshUrl = assets.mesh?.collider_mesh_url;
 
-        // Find SPZ URLs anywhere in JSON (handles schema drift)
+        // Find SPZ urls anywhere (schema-proof)
         const spzCandidates = findSpzUrlsDeep(w);
         if (!spzCandidates.length) {
           console.log("World JSON (no .spz found):", w);
@@ -219,7 +218,7 @@ export default function Home() {
         }
         const spzUrl = pickBestUrl(spzCandidates);
 
-        // Background pano
+        // Pano background
         if (panoUrl) {
           const tex = await new THREE.TextureLoader().loadAsync(panoUrl);
           tex.mapping = THREE.EquirectangularReflectionMapping;
@@ -246,13 +245,9 @@ export default function Home() {
 
         // SPZ splats
         if (splat) scene.remove(splat);
-
-        // NOTE: Spark will fetch any additional resources it needs internally.
         splat = new (SplatMesh as any)({ url: spzUrl });
-        splat.position.set(0, 0, 0);
         scene.add(splat);
 
-        // Start position
         rig.position.set(0, 0, 2.5);
         groundRig();
       }
@@ -319,20 +314,19 @@ export default function Home() {
 
       setStatus(`Generating… (operation ${opId.slice(0, 8)}…)`);
 
-      // Poll operation until we get world_id (World Labs returns it in metadata)
+      // Poll operation until we get world_id in metadata
       const started = Date.now();
       const MAX_MS = 6 * 60 * 1000;
       let attempt = 0;
-      let last: any = null;
+      let worldId: string | null = null;
 
-      while (true) {
+      while (!worldId) {
         const delay = Math.min(1500 + attempt * 300, 6000);
         await new Promise((res) => setTimeout(res, delay));
         attempt++;
 
         const opRes = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
         const op = await opRes.json();
-        last = op;
 
         if (!opRes.ok) throw new Error(op?.error || "Operation polling failed.");
         if (op?.error?.message) throw new Error(op.error.message);
@@ -344,30 +338,15 @@ export default function Home() {
 
         setStatus(statusText);
 
-        const worldId =
-          op?.metadata?.world_id ||
-          op?.metadata?.worldId ||
-          op?.response?.world_id ||
-          op?.response?.world?.world_id;
-
-        // KEY: break as soon as world_id exists
-        if (worldId) {
-          last = { ...op, response: { world_id: worldId } };
-          break;
-        }
-
-        if (op?.done === true) break;
+        worldId = op?.metadata?.world_id || op?.metadata?.worldId || null;
 
         if (Date.now() - started > MAX_MS) {
           throw new Error("Timed out waiting for world_id from operation.");
         }
       }
 
-      const w: any = last?.response ?? null;
-      if (!w?.world_id) throw new Error("No world_id found after polling.");
-
-      // Fetch the full world snapshot
-      const wRes = await fetch(`/api/worlds/${w.world_id}`, { cache: "no-store" });
+      // Fetch full world snapshot
+      const wRes = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
       const wFull = await wRes.json();
       if (!wRes.ok) throw new Error(wFull?.error || "Failed to fetch world.");
 
