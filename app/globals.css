@@ -1,0 +1,134 @@
+:root {
+  color-scheme: dark;
+  --bg: #070A0F;
+  --panel: rgba(255,255,255,0.06);
+  --stroke: rgba(255,255,255,0.12);
+  --text: rgba(255,255,255,0.92);
+  --muted: rgba(255,255,255,0.66);
+  --accent: #B7B9FF;
+  --accent2: #7CE0FF;
+  --bad: #FF6B6B;
+  --good: #7CFFB2;
+  --radius: 16px;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+a { color: inherit; }
+
+button, input, textarea {
+  font: inherit;
+  color: inherit;
+}
+
+.canvasWrap {
+  position: fixed;
+  inset: 0;
+}
+
+.ui {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  right: 14px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.panel {
+  pointer-events: auto;
+  background: linear-gradient(180deg, rgba(255,255,255,0.075), rgba(255,255,255,0.045));
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius);
+  padding: 12px;
+  box-shadow: 0 18px 60px rgba(0,0,0,0.45);
+  backdrop-filter: blur(10px);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--stroke);
+  background: rgba(0,0,0,0.35);
+  outline: none;
+}
+
+textarea:focus { border-color: rgba(183,185,255,0.55); }
+
+.btn {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(183,185,255,0.35);
+  background: rgba(183,185,255,0.12);
+  cursor: pointer;
+}
+
+.btn:hover { border-color: rgba(183,185,255,0.7); }
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pill {
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,0.04);
+}
+
+.statusGood { color: var(--good); }
+.statusBad { color: var(--bad); }
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+  line-height: 1.35;
+}
+
+/* WebXR button from three.js */
+#VRButton {
+  position: fixed !important;
+  right: 14px !important;
+  bottom: 14px !important;
+  left: auto !important;
+  top: auto !important;
+  z-index: 20 !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(124,224,255,0.45) !important;
+  background: rgba(124,224,255,0.10) !important;
+  color: rgba(255,255,255,0.92) !important;
+}
+
+#VRButton:hover {
+  border-color: rgba(124,224,255,0.8) !important;
+}
