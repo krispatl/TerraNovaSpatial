@@ -2,10 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 
+type Operation = {
+  operation_id: string;
+  done: boolean;
+  error: any;
+  metadata?: any;
+  response?: any; // when done=true, contains the World object
+};
+
 type World = {
   world_id: string;
-  display_name?: string;
   world_marble_url?: string;
+  display_name?: string;
   assets?: any;
   [k: string]: any;
 };
@@ -42,7 +50,6 @@ function findUrlsDeep(obj: any, exts: string[]): string[] {
 
 function pickBestUrl(urls: string[]): string {
   if (!urls.length) return "";
-  // crude heuristic: prefer urls that include higher-detail tokens
   const prefs = ["10m", "5m", "2m", "1m", "500k", "300k", "200k", "100k", "50k"];
   const lower = urls.map((u) => u.toLowerCase());
   for (const p of prefs) {
@@ -68,6 +75,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [world, setWorld] = useState<World | null>(null);
 
+  // --- Viewer boot (client-only) ---
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -78,7 +86,7 @@ export default function Home() {
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // Spark via CDN so Vercel/Next doesn’t bundle it.
+      // Spark via CDN (do not externalize "three" unless you also set up import maps)
       const spark = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
       const SplatMesh = (spark as any).SplatMesh;
 
@@ -101,13 +109,11 @@ export default function Home() {
       rig.add(camera);
       scene.add(rig);
 
-      // lighting
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 0.9));
       const dir = new THREE.DirectionalLight(0xffffff, 0.55);
       dir.position.set(3, 6, 2);
       scene.add(dir);
 
-      // grid + fallback floor
       const grid = new THREE.GridHelper(12, 24, 0x334455, 0x223344);
       (grid.material as any).transparent = true;
       (grid.material as any).opacity = 0.25;
@@ -203,13 +209,17 @@ export default function Home() {
         const panoUrl = assets?.imagery?.pano_url;
         const meshUrl = assets?.mesh?.collider_mesh_url;
 
-        // Find a .spz anywhere in the world JSON
-        const spzCandidates = findUrlsDeep(w, [".spz"]);
-        if (!spzCandidates.length) {
-          console.log("World JSON (no .spz found):", w);
-          throw new Error("No .spz URL found anywhere in world JSON.");
+        // World Labs splats should be in assets.splats.spz_urls, but we also deep-search to be safe.
+        const spzCandidates = [
+          ...findUrlsDeep(assets?.splats?.spz_urls, [".spz"]),
+          ...findUrlsDeep(w, [".spz"]),
+        ];
+        const spzUrl = pickBestUrl(Array.from(new Set(spzCandidates)));
+
+        if (!spzUrl) {
+          console.log("World (no .spz found):", w);
+          throw new Error("No .spz URL found in completed operation response.");
         }
-        const spzUrl = pickBestUrl(spzCandidates);
 
         if (panoUrl) {
           const tex = await new THREE.TextureLoader().loadAsync(panoUrl);
@@ -283,30 +293,28 @@ export default function Home() {
     };
   }, []);
 
-  async function waitForWorldWithSplats(worldId: string) {
+  // --- IMPORTANT: poll operation until done=true and response exists ---
+  async function waitForOperationComplete(operationId: string) {
     const started = Date.now();
-    const MAX_MS = 8 * 60 * 1000; // splats can take time
+    const MAX_MS = 12 * 60 * 1000; // plus can take a while
     let attempt = 0;
 
     while (true) {
-      const wRes = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
-      const w = await wRes.json();
-      if (!wRes.ok) throw new Error(w?.error || "Failed to fetch world.");
+      const opRes = await fetch(`/api/operations/${operationId}`, { cache: "no-store" });
+      const op = (await opRes.json()) as Operation;
 
-      // Do we have a .spz anywhere yet?
-      const spz = findUrlsDeep(w, [".spz"]);
-      if (spz.length) return w as World;
+      if (!opRes.ok) throw new Error((op as any)?.error || "Operation polling failed.");
+      if (op?.error?.message) throw new Error(op.error.message);
 
-      // Still baking
-      const msg =
-        w?.assets?.splats?.progress?.description ||
-        w?.status ||
-        "Waiting for splats to finish…";
-      setStatus(typeof msg === "string" ? msg : "Waiting for splats to finish…");
+      const desc = op?.metadata?.progress?.description || op?.metadata?.progress?.status || "Generating…";
+      setStatus(desc);
+
+      // We ONLY proceed when done=true and response is present.
+      if (op.done === true && op.response) return op;
 
       if (Date.now() - started > MAX_MS) {
-        console.log("World JSON (timed out waiting for .spz):", w);
-        throw new Error("Timed out waiting for .spz splat URLs to appear in world JSON.");
+        console.log("Last operation payload:", op);
+        throw new Error("Timed out waiting for operation to complete (done=true).");
       }
 
       const delay = Math.min(2000 + attempt * 400, 7000);
@@ -333,34 +341,12 @@ export default function Home() {
       const opId = gen.operation_id as string;
       if (!opId) throw new Error("No operation_id returned.");
 
-      // Poll operation until we have world_id
-      const started = Date.now();
-      const MAX_MS = 6 * 60 * 1000;
-      let attempt = 0;
-      let worldId: string | null = null;
+      setStatus(`Generating… (${opId.slice(0, 8)}…)`);
 
-      while (!worldId) {
-        const delay = Math.min(1500 + attempt * 300, 6000);
-        await sleep(delay);
-        attempt++;
+      const op = await waitForOperationComplete(opId);
 
-        const opRes = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
-        const op = await opRes.json();
-
-        if (!opRes.ok) throw new Error(op?.error || "Operation polling failed.");
-        if (op?.error?.message) throw new Error(op.error.message);
-
-        setStatus(op?.metadata?.progress?.description || op?.metadata?.progress?.status || "Generating…");
-
-        worldId = op?.metadata?.world_id || null;
-
-        if (Date.now() - started > MAX_MS) throw new Error("Timed out waiting for world_id from operation.");
-      }
-
-      setStatus("World created. Waiting for splats…");
-
-      // ✅ NEW: wait until splats exist
-      const wFull = await waitForWorldWithSplats(worldId);
+      // The completed world is HERE:
+      const wFull = op.response as World;
 
       setWorld(wFull);
       setStatus("Loading assets into WebXR viewer…");
@@ -382,6 +368,7 @@ export default function Home() {
   return (
     <>
       <div className="canvasWrap" ref={mountRef} />
+
       <div className="ui">
         <div className="panel">
           <div className="row">
@@ -395,9 +382,17 @@ export default function Home() {
             <div className="pill">
               <span style={{ color: "var(--muted)" }}>Status:</span> {status}
             </div>
+
             {world?.world_id ? (
               <div className="pill">
-                <span style={{ color: "var(--muted)" }}>World:</span> {world.world_id.slice(0, 8)}…
+                <span style={{ color: "var(--muted)" }}>World:</span>{" "}
+                {world.world_marble_url ? (
+                  <a href={world.world_marble_url} target="_blank" rel="noreferrer">
+                    {world.world_id.slice(0, 8)}…
+                  </a>
+                ) : (
+                  <span>{world.world_id.slice(0, 8)}…</span>
+                )}
               </div>
             ) : null}
           </div>
@@ -406,7 +401,9 @@ export default function Home() {
             <div className="hint statusBad">{error}</div>
           ) : (
             <div className="hint">
-              Quest: open in Quest Browser, click <b>ENTER VR</b>, then Generate. Movement: thumbstick.
+              Quest: open in Quest Browser → click <b>ENTER VR</b> → Generate. Movement: thumbstick.
+              <br />
+              (favicon 404 is harmless)
             </div>
           )}
         </div>
