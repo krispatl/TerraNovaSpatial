@@ -4,10 +4,10 @@ import { useEffect, useRef, useState } from "react";
 
 type Operation = {
   operation_id: string;
-  done: boolean;
-  error: any;
+  done?: boolean;
+  error?: any;
   metadata?: any;
-  response?: any; // when done=true, contains the World object
+  response?: any;
 };
 
 type World = {
@@ -17,6 +17,10 @@ type World = {
   assets?: any;
   [k: string]: any;
 };
+
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms));
+}
 
 function findUrlsDeep(obj: any, exts: string[]): string[] {
   const out: string[] = [];
@@ -59,10 +63,6 @@ function pickBestUrl(urls: string[]): string {
   return urls[0];
 }
 
-async function sleep(ms: number) {
-  await new Promise((r) => setTimeout(r, ms));
-}
-
 export default function Home() {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const runtimeRef = useRef<any>(null);
@@ -73,9 +73,14 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Idle.");
   const [error, setError] = useState<string | null>(null);
-  const [world, setWorld] = useState<World | null>(null);
 
-  // --- Viewer boot (client-only) ---
+  const [opId, setOpId] = useState<string | null>(null);
+  const [worldId, setWorldId] = useState<string | null>(null);
+
+  const [debugOp, setDebugOp] = useState<any>(null);
+  const [debugWorld, setDebugWorld] = useState<any>(null);
+
+  // -------- Viewer boot ----------
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -86,7 +91,7 @@ export default function Home() {
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
 
-      // Spark via CDN (do not externalize "three" unless you also set up import maps)
+      // Spark via CDN
       const spark = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
       const SplatMesh = (spark as any).SplatMesh;
 
@@ -209,16 +214,11 @@ export default function Home() {
         const panoUrl = assets?.imagery?.pano_url;
         const meshUrl = assets?.mesh?.collider_mesh_url;
 
-        // World Labs splats should be in assets.splats.spz_urls, but we also deep-search to be safe.
-        const spzCandidates = [
-          ...findUrlsDeep(assets?.splats?.spz_urls, [".spz"]),
-          ...findUrlsDeep(w, [".spz"]),
-        ];
-        const spzUrl = pickBestUrl(Array.from(new Set(spzCandidates)));
-
+        const spzCandidates = findUrlsDeep(w, [".spz"]);
+        const spzUrl = pickBestUrl(spzCandidates);
         if (!spzUrl) {
-          console.log("World (no .spz found):", w);
-          throw new Error("No .spz URL found in completed operation response.");
+          console.log("World JSON (still no .spz):", w);
+          throw new Error("No .spz URL found in world payload.");
         }
 
         if (panoUrl) {
@@ -293,31 +293,61 @@ export default function Home() {
     };
   }, []);
 
-  // --- IMPORTANT: poll operation until done=true and response exists ---
-  async function waitForOperationComplete(operationId: string) {
+  // -------- Operation -> world_id ----------
+  async function waitForWorldId(operationId: string) {
     const started = Date.now();
-    const MAX_MS = 12 * 60 * 1000; // plus can take a while
+    const MAX_MS = 8 * 60 * 1000;
     let attempt = 0;
 
     while (true) {
       const opRes = await fetch(`/api/operations/${operationId}`, { cache: "no-store" });
       const op = (await opRes.json()) as Operation;
 
+      setDebugOp(op);
+      console.log("[op poll]", attempt, op);
+
       if (!opRes.ok) throw new Error((op as any)?.error || "Operation polling failed.");
       if (op?.error?.message) throw new Error(op.error.message);
 
-      const desc = op?.metadata?.progress?.description || op?.metadata?.progress?.status || "Generating…";
-      setStatus(desc);
+      const msg = op?.metadata?.progress?.description || op?.metadata?.progress?.status || "World generation in progress";
+      setStatus(`${msg} (op poll ${attempt})`);
 
-      // We ONLY proceed when done=true and response is present.
-      if (op.done === true && op.response) return op;
+      const wid = op?.metadata?.world_id || op?.metadata?.worldId || null;
+      if (wid) return wid as string;
+
+      if (Date.now() - started > MAX_MS) throw new Error("Timed out waiting for world_id from operation.");
+      const delay = Math.min(1500 + attempt * 300, 6000);
+      attempt++;
+      await sleep(delay);
+    }
+  }
+
+  // -------- world_id -> wait for .spz ----------
+  async function waitForSpz(worldId: string) {
+    const started = Date.now();
+    const MAX_MS = 12 * 60 * 1000;
+    let attempt = 0;
+
+    while (true) {
+      const wRes = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
+      const w = (await wRes.json()) as World;
+
+      setDebugWorld(w);
+      console.log("[world poll]", attempt, w);
+
+      if (!wRes.ok) throw new Error((w as any)?.error || "World fetch failed.");
+
+      const spz = findUrlsDeep(w, [".spz"]);
+      if (spz.length) return w;
+
+      setStatus(`World exists. Waiting for splats… (world poll ${attempt})`);
 
       if (Date.now() - started > MAX_MS) {
-        console.log("Last operation payload:", op);
-        throw new Error("Timed out waiting for operation to complete (done=true).");
+        console.log("Timed out waiting for .spz. Last world JSON:", w);
+        throw new Error("Timed out waiting for .spz URLs to appear in world JSON.");
       }
 
-      const delay = Math.min(2000 + attempt * 400, 7000);
+      const delay = Math.min(2500 + attempt * 500, 8000);
       attempt++;
       await sleep(delay);
     }
@@ -327,6 +357,10 @@ export default function Home() {
     setBusy(true);
     setError(null);
     setStatus("Starting generation…");
+    setOpId(null);
+    setWorldId(null);
+    setDebugOp(null);
+    setDebugWorld(null);
 
     try {
       const r = await fetch("/api/worlds/generate", {
@@ -338,19 +372,19 @@ export default function Home() {
       const gen = await r.json();
       if (!r.ok) throw new Error(gen?.error || "Generate failed.");
 
-      const opId = gen.operation_id as string;
-      if (!opId) throw new Error("No operation_id returned.");
+      const operationId = gen.operation_id as string;
+      if (!operationId) throw new Error("No operation_id returned.");
 
-      setStatus(`Generating… (${opId.slice(0, 8)}…)`);
+      setOpId(operationId);
+      setStatus(`Generation started. Waiting for world_id…`);
 
-      const op = await waitForOperationComplete(opId);
+      const wid = await waitForWorldId(operationId);
+      setWorldId(wid);
+      setStatus(`Got world_id. Waiting for splats…`);
 
-      // The completed world is HERE:
-      const wFull = op.response as World;
+      const wFull = await waitForSpz(wid);
 
-      setWorld(wFull);
       setStatus("Loading assets into WebXR viewer…");
-
       const rt = runtimeRef.current;
       if (!rt?.loadWorldAssets) throw new Error("Viewer not ready.");
       await rt.loadWorldAssets(wFull);
@@ -382,30 +416,38 @@ export default function Home() {
             <div className="pill">
               <span style={{ color: "var(--muted)" }}>Status:</span> {status}
             </div>
-
-            {world?.world_id ? (
+            {opId ? (
               <div className="pill">
-                <span style={{ color: "var(--muted)" }}>World:</span>{" "}
-                {world.world_marble_url ? (
-                  <a href={world.world_marble_url} target="_blank" rel="noreferrer">
-                    {world.world_id.slice(0, 8)}…
-                  </a>
-                ) : (
-                  <span>{world.world_id.slice(0, 8)}…</span>
-                )}
+                <span style={{ color: "var(--muted)" }}>Op:</span> {opId.slice(0, 8)}…
+              </div>
+            ) : null}
+            {worldId ? (
+              <div className="pill">
+                <span style={{ color: "var(--muted)" }}>World:</span> {worldId.slice(0, 8)}…
               </div>
             ) : null}
           </div>
 
-          {error ? (
-            <div className="hint statusBad">{error}</div>
-          ) : (
-            <div className="hint">
-              Quest: open in Quest Browser → click <b>ENTER VR</b> → Generate. Movement: thumbstick.
-              <br />
-              (favicon 404 is harmless)
-            </div>
-          )}
+          {error ? <div className="hint statusBad">{error}</div> : null}
+
+          {/* Debug view so you can see what's coming back without Vercel logs */}
+          <details style={{ marginTop: 10 }}>
+            <summary style={{ cursor: "pointer" }}>Debug (last API payloads)</summary>
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, opacity: 0.9, maxHeight: 220, overflow: "auto" }}>
+              {JSON.stringify(
+                {
+                  lastOperation: debugOp,
+                  lastWorld: debugWorld,
+                },
+                null,
+                2
+              )}
+            </pre>
+          </details>
+
+          <div className="hint" style={{ marginTop: 10 }}>
+            (favicon 404 is harmless) — if you want it gone: add <code>public/favicon.ico</code>.
+          </div>
         </div>
       </div>
     </>
