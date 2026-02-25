@@ -28,11 +28,13 @@ function pickBestSpz(spz_urls?: Record<string, string>): { key: string; url: str
     const hit = entries.find(([k]) => k.toLowerCase() === p);
     if (hit) return { key: hit[0], url: hit[1] };
   }
+
   // Some APIs might use numeric-ish keys; try largest number found.
   const numeric = entries
     .map(([k, url]) => ({ k, url, n: Number(String(k).replace(/[^0-9]/g, "")) }))
     .filter((x) => Number.isFinite(x.n) && x.n > 0)
     .sort((a, b) => b.n - a.n);
+
   if (numeric.length) return { key: numeric[0].k, url: numeric[0].url };
 
   return { key: entries[0][0], url: entries[0][1] };
@@ -65,7 +67,10 @@ export default function Home() {
       const THREE = await import("three");
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
       const { GLTFLoader } = await import("three/examples/jsm/loaders/GLTFLoader.js");
-      const { SplatMesh } = await import(/* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10");
+      // IMPORTANT: load Spark at runtime via CDN so Next/Vercel doesn't try to bundle it.
+      const { SplatMesh } = await import(
+        /* webpackIgnore: true */ "https://esm.sh/@sparkjsdev/spark@0.1.10"
+      );
 
       if (disposed || !mountRef.current) return;
 
@@ -94,80 +99,72 @@ export default function Home() {
       dir.position.set(3, 6, 2);
       scene.add(dir);
 
-      // A subtle reference grid you can disable later
+      // A subtle reference grid
       const grid = new THREE.GridHelper(12, 24, 0x334455, 0x223344);
       (grid.material as any).transparent = true;
       (grid.material as any).opacity = 0.25;
       scene.add(grid);
 
-      // Floor (for non-mesh worlds and as fallback)
+      // Floor (fallback)
       const floor = new THREE.Mesh(
         new THREE.PlaneGeometry(200, 200),
         new THREE.MeshStandardMaterial({ color: 0x0b0f17, metalness: 0.0, roughness: 1.0 })
       );
       floor.rotation.x = -Math.PI / 2;
       floor.position.y = -0.01;
-      floor.receiveShadow = true;
       scene.add(floor);
 
       const gltfLoader = new GLTFLoader();
 
-      // For grounding the rig on collider mesh (simple raycast)
+      // Collider mesh handling (raycast)
       let colliderRoot: any = null;
       let colliderMeshes: any[] = [];
 
       function collectColliderMeshes(root: any) {
         colliderMeshes = [];
         root.traverse((o: any) => {
-          if (o?.isMesh) {
-            colliderMeshes.push(o);
-          }
+          if (o?.isMesh) colliderMeshes.push(o);
         });
       }
 
       const downRay = new THREE.Raycaster();
       const tmpVec = new THREE.Vector3();
 
-      // Locomotion (thumbstick)
-      const move = { x: 0, z: 0 };
-      const speed = 1.8; // meters/sec
+      // Smooth locomotion via thumbstick
+      const speed = 1.8; // m/s
       const clock = new THREE.Clock();
 
       function updateLocomotion(dt: number) {
         const session = renderer.xr.getSession();
         if (!session) return;
 
-        let ax = 0, ay = 0;
+        let ax = 0,
+          ay = 0;
         for (const src of session.inputSources) {
           const gp = (src as any)?.gamepad;
           if (!gp || !gp.axes || gp.axes.length < 2) continue;
 
-          // Heuristic:
-          // - some controllers use axes[2,3] for thumbstick; some use [0,1]
           const a0 = gp.axes[0] ?? 0;
           const a1 = gp.axes[1] ?? 0;
           const a2 = gp.axes[2] ?? 0;
           const a3 = gp.axes[3] ?? 0;
 
-          // pick the pair with larger magnitude
           const mag01 = Math.abs(a0) + Math.abs(a1);
           const mag23 = Math.abs(a2) + Math.abs(a3);
-          if (mag23 > mag01) { ax = a2; ay = a3; } else { ax = a0; ay = a1; }
-
-          // Use first usable gamepad (Quest controllers)
+          if (mag23 > mag01) {
+            ax = a2;
+            ay = a3;
+          } else {
+            ax = a0;
+            ay = a1;
+          }
           break;
         }
 
-        // Deadzone
         const dz = 0.15;
-        move.x = Math.abs(ax) > dz ? ax : 0;
-        move.z = Math.abs(ay) > dz ? ay : 0;
-
-        if (move.x === 0 && move.z === 0) return;
-
-        // Forward/right based on camera direction (XZ plane)
-        const camWorld = new THREE.Vector3();
-        camera.getWorldPosition(camWorld);
+        const mx = Math.abs(ax) > dz ? ax : 0;
+        const mz = Math.abs(ay) > dz ? ay : 0;
+        if (mx === 0 && mz === 0) return;
 
         const forward = new THREE.Vector3();
         camera.getWorldDirection(forward);
@@ -177,8 +174,8 @@ export default function Home() {
         const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
 
         const delta = new THREE.Vector3()
-          .addScaledVector(right, move.x)
-          .addScaledVector(forward, -move.z)
+          .addScaledVector(right, mx)
+          .addScaledVector(forward, -mz)
           .multiplyScalar(speed * dt);
 
         rig.position.add(delta);
@@ -187,7 +184,6 @@ export default function Home() {
       function groundRig() {
         if (!colliderMeshes.length) return;
 
-        // Raycast from rig downwards
         tmpVec.copy(rig.position);
         tmpVec.y += 3.0;
 
@@ -198,11 +194,10 @@ export default function Home() {
         if (!hits.length) return;
 
         const y = hits[0].point.y;
-        // Keep headset ~1.6m above ground; because rig holds camera at y=1.6 by default
-        rig.position.y = y;
+        rig.position.y = y; // camera is at y=1.6 inside rig
       }
 
-      // Active world objects
+      // Active world object refs
       let splat: any = null;
 
       async function loadWorldAssets(w: World) {
@@ -222,15 +217,17 @@ export default function Home() {
         // 2) collider mesh
         if (meshUrl) {
           const gltf = await gltfLoader.loadAsync(meshUrl);
+
           if (colliderRoot) scene.remove(colliderRoot);
           colliderRoot = gltf.scene;
-          // Make it mostly invisible but raycastable.
+
           colliderRoot.traverse((o: any) => {
             if (o?.isMesh) {
               o.material = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.0 });
               o.frustumCulled = false;
             }
           });
+
           scene.add(colliderRoot);
           collectColliderMeshes(colliderRoot);
         }
@@ -240,13 +237,12 @@ export default function Home() {
 
         if (splat) scene.remove(splat);
 
-        // Spark SplatMesh supports .spz directly (streamed)
-        splat = new SplatMesh({ url: spz.url });
+        // Spark SplatMesh supports .spz directly
+        splat = new (SplatMesh as any)({ url: spz.url });
         splat.position.set(0, 0, 0);
-        // Some splats come in rotated; you can adjust here if needed.
         scene.add(splat);
 
-        // Spawn rig slightly back so you don't start inside the cloud
+        // Spawn rig slightly back
         rig.position.set(0, 0, 2.5);
         groundRig();
       }
@@ -290,7 +286,9 @@ export default function Home() {
 
     return () => {
       disposed = true;
-      try { runtimeRef.current?.dispose?.(); } catch {}
+      try {
+        runtimeRef.current?.dispose?.();
+      } catch {}
       runtimeRef.current = null;
     };
   }, []);
@@ -318,29 +316,56 @@ export default function Home() {
 
       setStatus(`Generating… (operation ${opId.slice(0, 8)}…)`);
 
-      let done = false;
+      // --- Poll operation until we get world_id (World Labs returns it in metadata) ---
+      const started = Date.now();
+      const MAX_MS = 6 * 60 * 1000; // 6 minutes
+      let attempt = 0;
+
       let last: any = null;
 
-      while (!done) {
-        await new Promise((res) => setTimeout(res, 1500));
-        const opRes = await fetch(`/api/operations/${opId}`);
+      while (true) {
+        const delay = Math.min(1500 + attempt * 300, 6000);
+        await new Promise((res) => setTimeout(res, delay));
+        attempt++;
+
+        const opRes = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
         const op = await opRes.json();
         last = op;
 
         if (!opRes.ok) throw new Error(op?.error || "Operation polling failed.");
-
         if (op?.error?.message) throw new Error(op.error.message);
-        done = Boolean(op?.done);
 
-        const pct = typeof op?.metadata?.progress === "number" ? Math.round(op.metadata.progress * 100) : null;
-        setStatus(done ? "Finalizing…" : pct !== null ? `Generating… ${pct}%` : "Generating…");
+        const statusText =
+          op?.metadata?.progress?.description ||
+          op?.metadata?.progress?.status ||
+          "World generation in progress";
+
+        setStatus(statusText);
+
+        const worldId =
+          op?.metadata?.world_id ||
+          op?.metadata?.worldId ||
+          op?.response?.world_id ||
+          op?.response?.world?.world_id;
+
+        // ✅ KEY FIX: break as soon as we have world_id (even if done=false / response=null)
+        if (worldId) {
+          last = { ...op, response: { world_id: worldId } };
+          break;
+        }
+
+        if (op?.done === true) break;
+
+        if (Date.now() - started > MAX_MS) {
+          throw new Error("Timed out waiting for world_id from operation.");
+        }
       }
 
-      const w: World | null = last?.response ?? null;
-      if (!w?.world_id) throw new Error("Operation completed but no world returned.");
+      const w: any = last?.response ?? null;
+      if (!w?.world_id) throw new Error("No world_id found after polling.");
 
-      // Fetch the latest world snapshot (recommended by docs)
-      const wRes = await fetch(`/api/worlds/${w.world_id}`);
+      // Fetch full world snapshot
+      const wRes = await fetch(`/api/worlds/${w.world_id}`, { cache: "no-store" });
       const wFull = await wRes.json();
       if (!wRes.ok) throw new Error(wFull?.error || "Failed to fetch world.");
 
@@ -373,7 +398,7 @@ export default function Home() {
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="Describe a location… (up to 2000 chars)"
+              placeholder="Describe a location…"
               spellCheck={false}
             />
             <button className="btn" onClick={generate} disabled={busy || !prompt.trim()}>
@@ -382,27 +407,37 @@ export default function Home() {
           </div>
 
           <div className="meta" style={{ marginTop: 10 }}>
-            <div className="pill"><span style={{ color: "var(--muted)" }}>Status:</span> {status}</div>
+            <div className="pill">
+              <span style={{ color: "var(--muted)" }}>Status:</span> {status}
+            </div>
+
             {world?.world_id ? (
               <div className="pill">
                 <span style={{ color: "var(--muted)" }}>World:</span>{" "}
-                <a href={world.world_marble_url} target="_blank" rel="noreferrer">{world.world_id.slice(0, 8)}…</a>
+                {world.world_marble_url ? (
+                  <a href={world.world_marble_url} target="_blank" rel="noreferrer">
+                    {world.world_id.slice(0, 8)}…
+                  </a>
+                ) : (
+                  <span>{world.world_id.slice(0, 8)}…</span>
+                )}
               </div>
             ) : null}
+
             {spzInfo ? (
-              <div className="pill"><span style={{ color: "var(--muted)" }}>SPZ:</span> {spzInfo.key}</div>
+              <div className="pill">
+                <span style={{ color: "var(--muted)" }}>SPZ:</span> {spzInfo.key}
+              </div>
             ) : null}
           </div>
 
           {error ? (
-            <div className="hint statusBad">
-              {error}
-            </div>
+            <div className="hint statusBad">{error}</div>
           ) : (
             <div className="hint">
-              Quest: open this site in the Quest browser, click <b>ENTER VR</b>, then generate. Movement: use thumbstick (smooth locomotion).
+              Quest: open this site in Quest Browser, click <b>ENTER VR</b>, then Generate.
               <br />
-              Splats are rendered via Spark’s <code>SplatMesh</code> which supports <code>.spz</code> directly. 
+              Movement: thumbstick (smooth locomotion).
             </div>
           )}
         </div>
