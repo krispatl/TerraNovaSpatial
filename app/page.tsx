@@ -54,6 +54,7 @@ function findUrlsDeep(obj: any, exts: string[]): string[] {
 
 function pickBestUrl(urls: string[]): string {
   if (!urls.length) return "";
+  // If World Labs returns multiple .spz variants, you can enhance this later.
   return urls[0];
 }
 
@@ -82,24 +83,18 @@ export default function Home() {
       const THREE = await import("three");
       const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
 
-      // Spark via CDN
-      // @ts-ignore - remote URL module has no TS types
-      const spark = await import(
-        /* webpackIgnore: true */
-        "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
-      );
-      const SplatMesh = (spark as any).SplatMesh;
+      // ---- Spark via CDN, WITHOUT TS trying to resolve the URL module ----
+      // TS complains when the URL is a literal inside import(). So we import via a runtime function.
+      const sparkUrl = "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js";
+      const dynamicImport = new Function("u", "return import(u)") as (u: string) => Promise<any>;
+      const spark = await dynamicImport(sparkUrl);
+      const SplatMesh = spark.SplatMesh;
 
       if (disposed || !mountRef.current) return;
 
       const scene = new THREE.Scene();
 
-      const camera = new THREE.PerspectiveCamera(
-        65,
-        window.innerWidth / window.innerHeight,
-        0.05,
-        2000
-      );
+      const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.05, 2000);
       camera.position.set(0, 1.6, 2.2);
 
       const renderer = new THREE.WebGLRenderer({
@@ -114,7 +109,6 @@ export default function Home() {
       mountRef.current.appendChild(renderer.domElement);
       document.body.appendChild(VRButton.createButton(renderer));
 
-      // simple lighting
       scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
 
       let splat: any = null;
@@ -124,7 +118,7 @@ export default function Home() {
         const spzUrl = pickBestUrl(spzCandidates);
 
         if (!spzUrl) {
-          console.log("World JSON:", w);
+          console.log("World JSON (no .spz):", w);
           throw new Error("No .spz URL found in world payload.");
         }
 
@@ -153,9 +147,7 @@ export default function Home() {
           window.removeEventListener("resize", onResize);
           renderer.setAnimationLoop(null as any);
           renderer.dispose();
-          if (renderer.domElement?.parentNode) {
-            renderer.domElement.parentNode.removeChild(renderer.domElement);
-          }
+          if (renderer.domElement?.parentNode) renderer.domElement.parentNode.removeChild(renderer.domElement);
           const vrBtn = document.getElementById("VRButton");
           if (vrBtn?.parentNode) vrBtn.parentNode.removeChild(vrBtn);
         },
@@ -165,6 +157,7 @@ export default function Home() {
     boot().catch((e) => {
       console.error(e);
       setError(String(e?.message || e));
+      setStatus("Viewer failed to boot.");
     });
 
     return () => {
@@ -187,7 +180,7 @@ export default function Home() {
       setDebugOp(op);
 
       const wid = op?.metadata?.world_id;
-      if (wid) return wid;
+      if (wid) return wid as string;
 
       setStatus(op?.metadata?.progress?.description || "World generation in progress");
       await sleep(2000);
@@ -258,7 +251,7 @@ export default function Home() {
           position: "absolute",
           top: 20,
           left: 20,
-          width: 420,
+          width: 440,
           background: "rgba(0,0,0,0.75)",
           padding: 16,
           borderRadius: 12,
@@ -268,22 +261,18 @@ export default function Home() {
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          style={{ width: "100%", height: 80 }}
+          style={{ width: "100%", height: 86 }}
         />
-        <button
-          onClick={generate}
-          disabled={busy || !prompt.trim()}
-          style={{ marginTop: 10, width: "100%" }}
-        >
+        <button onClick={generate} disabled={busy || !prompt.trim()} style={{ marginTop: 10, width: "100%" }}>
           {busy ? "Working…" : "Generate"}
         </button>
 
         <div style={{ marginTop: 10 }}>Status: {status}</div>
-        {error && <div style={{ color: "red", marginTop: 8 }}>{error}</div>}
+        {error && <div style={{ color: "#ff6b6b", marginTop: 8 }}>{error}</div>}
 
         <details style={{ marginTop: 10 }}>
           <summary>Debug</summary>
-          <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 220, overflow: "auto" }}>
+          <pre style={{ fontSize: 11, whiteSpace: "pre-wrap", maxHeight: 240, overflow: "auto" }}>
             {JSON.stringify({ lastOperation: debugOp, lastWorld: debugWorld }, null, 2)}
           </pre>
         </details>
