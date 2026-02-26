@@ -8,9 +8,12 @@ export default function Home() {
   const rendererRef = useRef<any>(null);
   const vrButtonRef = useRef<HTMLElement | null>(null);
   const controlsRef = useRef<any>(null);
-  const cameraRef = useRef<any>(null);
+
   const sceneRef = useRef<any>(null);
-  const splatRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
+
+  // We store the pivot group here (not the raw splat), so we can remove/replace cleanly.
+  const splatRootRef = useRef<any>(null);
 
   const [prompt, setPrompt] = useState(
     "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, cinematic lighting."
@@ -38,7 +41,7 @@ export default function Home() {
 
         if (disposed) return;
 
-        // --- Scene ---
+        // ---------- Scene ----------
         const scene = new THREE.Scene();
         sceneRef.current = scene;
 
@@ -46,7 +49,7 @@ export default function Home() {
           65,
           window.innerWidth / window.innerHeight,
           0.05,
-          2000
+          5000
         );
         camera.position.set(0, 1.6, 2.2);
         cameraRef.current = camera;
@@ -60,7 +63,7 @@ export default function Home() {
         mountRef.current.innerHTML = "";
         mountRef.current.appendChild(renderer.domElement);
 
-        // VR button (safe if device doesn't support XR; it will show "VR NOT SUPPORTED")
+        // VR button (will show not supported if not available)
         if (vrButtonRef.current) {
           try {
             vrButtonRef.current.remove();
@@ -71,7 +74,7 @@ export default function Home() {
         vrButtonRef.current = vrBtn;
         document.body.appendChild(vrBtn);
 
-        // Orbit controls for non-XR navigation
+        // Orbit controls (mouse/touch navigation)
         const controls = new OrbitControls(camera, renderer.domElement);
         controlsRef.current = controls;
 
@@ -80,13 +83,14 @@ export default function Home() {
         controls.enablePan = true;
         controls.screenSpacePanning = false;
 
-        // Tune these however you like:
         controls.minDistance = 0.2;
-        controls.maxDistance = 50;
+        controls.maxDistance = 2000;
+
+        // Default target (will be overwritten when splat loads)
         controls.target.set(0, 1.2, 0);
         controls.update();
 
-        // Disable OrbitControls during XR sessions (so they don't fight XR pose)
+        // Disable OrbitControls during XR sessions
         const onSessionStart = () => {
           if (controlsRef.current) controlsRef.current.enabled = false;
         };
@@ -109,42 +113,107 @@ export default function Home() {
         };
         window.addEventListener("resize", onResize);
 
-        // Load world splat
+        // Helper: wait a couple frames so the object has matrices ready
+        const waitFrames = (n: number) =>
+          new Promise<void>((resolve) => {
+            let i = 0;
+            const tick = () => {
+              i++;
+              if (i >= n) resolve();
+              else requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          });
+
+        // Helper: center camera + controls on an Object3D (pivot)
+        function frameCameraToObject(root: any) {
+          const cam = cameraRef.current;
+          const ctrls = controlsRef.current;
+          const r = rendererRef.current;
+          if (!cam || !ctrls || !r) return;
+
+          // Compute world bounds
+          root.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(root);
+
+          // If the box is empty (rare), just bail
+          if (!isFinite(box.min.x) || !isFinite(box.max.x) || box.isEmpty()) return;
+
+          const center = new THREE.Vector3();
+          const size = new THREE.Vector3();
+          box.getCenter(center);
+          box.getSize(size);
+
+          // Rough radius
+          const radius = Math.max(size.x, size.y, size.z) * 0.5;
+          const safeRadius = Math.max(radius, 0.5);
+
+          // Choose a start direction (slightly above and back)
+          const dir = new THREE.Vector3(0.25, 0.25, 1).normalize();
+
+          // Distance based on FOV so it fits nicely
+          const fov = (cam.fov * Math.PI) / 180;
+          const fitDist = safeRadius / Math.tan(fov / 2);
+
+          const distance = fitDist * 1.15; // padding
+          const newPos = center.clone().add(dir.multiplyScalar(distance));
+
+          cam.position.copy(newPos);
+
+          // Keep near/far sane for big worlds
+          cam.near = Math.max(0.01, distance / 1000);
+          cam.far = Math.max(5000, distance * 20);
+          cam.updateProjectionMatrix();
+
+          ctrls.target.copy(center);
+          ctrls.update();
+        }
+
+        // Load world splat + flip + frame camera to center
         async function loadWorld(world: any) {
           const match = JSON.stringify(world).match(/https:\/\/[^"]+\.spz/);
           if (!match) throw new Error("No .spz found in world payload.");
           const url = match[0];
 
-          // Remove prior splat
-          if (splatRef.current) {
+          // Remove prior splat root
+          if (splatRootRef.current) {
             try {
-              scene.remove(splatRef.current);
-              splatRef.current?.dispose?.();
+              scene.remove(splatRootRef.current);
+              // if Spark exposes dispose on mesh, this tries to clean it up
+              splatRootRef.current?.traverse?.((o: any) => o?.dispose?.());
             } catch {}
-            splatRef.current = null;
+            splatRootRef.current = null;
           }
 
           setStatus("Loading splat…");
+
+          // Pivot root (so we can rotate/transform cleanly)
+          const pivot = new THREE.Group();
+
+          // ✅ Fix upside-down: most common is 180° around X
+          pivot.rotation.x = Math.PI;
+
+          // If you ever find it's still rotated weirdly, try toggling:
+          // pivot.rotation.y = Math.PI;
+          // pivot.rotation.z = Math.PI / 2;
+
           const splat = new SplatMesh({ url });
-          splatRef.current = splat;
+          pivot.add(splat);
 
-          // Optional: center-ish starting pose
-          // splat.position.set(0, 0, -3);
+          scene.add(pivot);
+          splatRootRef.current = pivot;
 
-          scene.add(splat);
+          // Wait a couple frames so the object/matrices settle, then frame camera
+          await waitFrames(2);
+          frameCameraToObject(pivot);
 
-          // Re-aim camera nicely after load (optional)
-          if (controlsRef.current) {
-            controlsRef.current.target.set(0, 1.2, 0);
-            controlsRef.current.update();
-          }
+          setStatus("Ready.");
         }
 
         (window as any).loadWorldAssets = loadWorld;
 
         // Render loop
         renderer.setAnimationLoop(() => {
-          // OrbitControls needs an update each frame for damping
           if (controlsRef.current && controlsRef.current.enabled) {
             controlsRef.current.update();
           }
@@ -172,7 +241,7 @@ export default function Home() {
       rendererRef.current = null;
 
       try {
-        if (controlsRef.current) controlsRef.current.dispose?.();
+        controlsRef.current?.dispose?.();
       } catch {}
       controlsRef.current = null;
 
@@ -182,11 +251,11 @@ export default function Home() {
       vrButtonRef.current = null;
 
       try {
-        if (splatRef.current) {
-          splatRef.current.dispose?.();
-          splatRef.current = null;
+        if (sceneRef.current && splatRootRef.current) {
+          sceneRef.current.remove(splatRootRef.current);
         }
       } catch {}
+      splatRootRef.current = null;
 
       cameraRef.current = null;
       sceneRef.current = null;
@@ -230,7 +299,6 @@ export default function Home() {
                 throw new Error("Renderer not ready yet (loadWorldAssets missing).");
               }
               await (window as any).loadWorldAssets(world);
-              setStatus("Ready.");
               setBusy(false);
               return;
             }
