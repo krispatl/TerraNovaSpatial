@@ -4,8 +4,12 @@ import { useEffect, useRef, useState } from "react";
 
 export default function Home() {
   const mountRef = useRef<HTMLDivElement | null>(null);
+
   const rendererRef = useRef<any>(null);
   const vrButtonRef = useRef<HTMLElement | null>(null);
+  const controlsRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
+  const sceneRef = useRef<any>(null);
   const splatRef = useRef<any>(null);
 
   const [prompt, setPrompt] = useState(
@@ -23,17 +27,20 @@ export default function Home() {
       try {
         setStatus("Booting…");
 
-        // Load Three + helpers from your installed deps (NOT CDN import maps)
         const THREE = await import("three");
         const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
+        const { OrbitControls } = await import(
+          "three/examples/jsm/controls/OrbitControls.js"
+        );
 
-        // ✅ Load Spark from npm (this is the critical fix for Vercel)
+        // Spark from npm (Vercel-safe)
         const { SplatMesh } = await import("@sparkjsdev/spark");
 
         if (disposed) return;
 
         // --- Scene ---
         const scene = new THREE.Scene();
+        sceneRef.current = scene;
 
         const camera = new THREE.PerspectiveCamera(
           65,
@@ -42,19 +49,18 @@ export default function Home() {
           2000
         );
         camera.position.set(0, 1.6, 2.2);
+        cameraRef.current = camera;
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.xr.enabled = true;
-
-        // Save renderer so we can clean up
         rendererRef.current = renderer;
 
         // Mount canvas
         mountRef.current.innerHTML = "";
         mountRef.current.appendChild(renderer.domElement);
 
-        // Add VR button (avoid duplicates on HMR / re-mount)
+        // VR button (safe if device doesn't support XR; it will show "VR NOT SUPPORTED")
         if (vrButtonRef.current) {
           try {
             vrButtonRef.current.remove();
@@ -65,48 +71,83 @@ export default function Home() {
         vrButtonRef.current = vrBtn;
         document.body.appendChild(vrBtn);
 
+        // Orbit controls for non-XR navigation
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controlsRef.current = controls;
+
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.08;
+        controls.enablePan = true;
+        controls.screenSpacePanning = false;
+
+        // Tune these however you like:
+        controls.minDistance = 0.2;
+        controls.maxDistance = 50;
+        controls.target.set(0, 1.2, 0);
+        controls.update();
+
+        // Disable OrbitControls during XR sessions (so they don't fight XR pose)
+        const onSessionStart = () => {
+          if (controlsRef.current) controlsRef.current.enabled = false;
+        };
+        const onSessionEnd = () => {
+          if (controlsRef.current) controlsRef.current.enabled = true;
+        };
+        renderer.xr.addEventListener("sessionstart", onSessionStart);
+        renderer.xr.addEventListener("sessionend", onSessionEnd);
+
         // Lighting
         scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
 
-        // Resize handling
+        // Resize
         const onResize = () => {
-          if (!rendererRef.current) return;
-          const r = rendererRef.current;
-          camera.aspect = window.innerWidth / window.innerHeight;
-          camera.updateProjectionMatrix();
-          r.setSize(window.innerWidth, window.innerHeight);
+          if (!rendererRef.current || !cameraRef.current) return;
+          const cam = cameraRef.current;
+          cam.aspect = window.innerWidth / window.innerHeight;
+          cam.updateProjectionMatrix();
+          rendererRef.current.setSize(window.innerWidth, window.innerHeight);
         };
         window.addEventListener("resize", onResize);
 
-        // Load splat from the WorldLabs world JSON
+        // Load world splat
         async function loadWorld(world: any) {
           const match = JSON.stringify(world).match(/https:\/\/[^"]+\.spz/);
           if (!match) throw new Error("No .spz found in world payload.");
-
           const url = match[0];
 
           // Remove prior splat
           if (splatRef.current) {
             try {
               scene.remove(splatRef.current);
-              // Spark meshes are THREE objects; dispose if available
               splatRef.current?.dispose?.();
             } catch {}
             splatRef.current = null;
           }
 
+          setStatus("Loading splat…");
           const splat = new SplatMesh({ url });
           splatRef.current = splat;
 
-          // Optional: tweak orientation/position if needed
+          // Optional: center-ish starting pose
           // splat.position.set(0, 0, -3);
 
           scene.add(splat);
+
+          // Re-aim camera nicely after load (optional)
+          if (controlsRef.current) {
+            controlsRef.current.target.set(0, 1.2, 0);
+            controlsRef.current.update();
+          }
         }
 
         (window as any).loadWorldAssets = loadWorld;
 
+        // Render loop
         renderer.setAnimationLoop(() => {
+          // OrbitControls needs an update each frame for damping
+          if (controlsRef.current && controlsRef.current.enabled) {
+            controlsRef.current.update();
+          }
           renderer.render(scene, camera);
         });
 
@@ -122,27 +163,33 @@ export default function Home() {
     return () => {
       disposed = true;
 
-      // Stop XR loop + dispose renderer
       try {
         if (rendererRef.current) {
           rendererRef.current.setAnimationLoop(null);
           rendererRef.current.dispose?.();
         }
       } catch {}
-
       rendererRef.current = null;
 
-      // Remove VR button if present
+      try {
+        if (controlsRef.current) controlsRef.current.dispose?.();
+      } catch {}
+      controlsRef.current = null;
+
       try {
         if (vrButtonRef.current) vrButtonRef.current.remove();
       } catch {}
       vrButtonRef.current = null;
 
-      // Clear splat
       try {
-        splatRef.current?.dispose?.();
+        if (splatRef.current) {
+          splatRef.current.dispose?.();
+          splatRef.current = null;
+        }
       } catch {}
-      splatRef.current = null;
+
+      cameraRef.current = null;
+      sceneRef.current = null;
     };
   }, []);
 
@@ -156,7 +203,6 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: prompt }),
       });
-
       if (!r.ok) throw new Error(`Generate failed: ${r.status} ${r.statusText}`);
 
       const gen = await r.json();
@@ -165,18 +211,18 @@ export default function Home() {
 
       // Poll operation until it yields a world_id
       while (true) {
-        const op = await fetch(`/api/operations/${opId}`, { cache: "no-store" }).then(
-          (x) => x.json()
-        );
+        const op = await fetch(`/api/operations/${opId}`, {
+          cache: "no-store",
+        }).then((x) => x.json());
 
         if (op?.metadata?.world_id) {
           const worldId = op.metadata.world_id;
 
           // Poll world until it contains .spz
           while (true) {
-            const world = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" }).then(
-              (x) => x.json()
-            );
+            const world = await fetch(`/api/worlds/${worldId}`, {
+              cache: "no-store",
+            }).then((x) => x.json());
 
             if (JSON.stringify(world).includes(".spz")) {
               setStatus("Loading…");
