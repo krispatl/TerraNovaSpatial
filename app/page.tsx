@@ -323,7 +323,7 @@ export default function Home() {
           setStatusDetail("Loading saved world…");
 
           const t0 = Date.now();
-          const MAX_MS = 5 * 60 * 1000; // 5 min for initial load
+       
 
           let delay = 1200;
           while (Date.now() - t0 < MAX_MS) {
