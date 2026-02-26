@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 
 export default function Home() {
   const mountRef = useRef<HTMLDivElement | null>(null);
+  const rendererRef = useRef<any>(null);
+  const vrButtonRef = useRef<HTMLElement | null>(null);
+  const splatRef = useRef<any>(null);
 
   const [prompt, setPrompt] = useState(
     "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, cinematic lighting."
@@ -12,118 +15,190 @@ export default function Home() {
   const [status, setStatus] = useState("Idle.");
 
   useEffect(() => {
-    if (!mountRef.current) return;
-
-    // Inject import map once
-    if (!document.getElementById("three-importmap")) {
-      const script = document.createElement("script");
-      script.type = "importmap";
-      script.id = "three-importmap";
-      script.textContent = JSON.stringify({
-        imports: {
-          three: "https://unpkg.com/three@0.178.0/build/three.module.js",
-          "three/examples/jsm/":
-            "https://unpkg.com/three@0.178.0/examples/jsm/",
-        },
-      });
-      document.head.appendChild(script);
-    }
+    let disposed = false;
 
     async function boot() {
-      const THREE = await import("three");
-      const { VRButton } = await import(
-        "three/examples/jsm/webxr/VRButton.js"
-      );
+      if (!mountRef.current) return;
 
-      const spark = await import(
-        "https://sparkjs.dev/releases/spark/0.1.10/spark.module.js"
-      );
+      try {
+        setStatus("Booting…");
 
-      const SplatMesh = spark.SplatMesh;
+        // Load Three + helpers from your installed deps (NOT CDN import maps)
+        const THREE = await import("three");
+        const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
 
-      const scene = new THREE.Scene();
+        // ✅ Load Spark from npm (this is the critical fix for Vercel)
+        const { SplatMesh } = await import("@sparkjsdev/spark");
 
-      const camera = new THREE.PerspectiveCamera(
-        65,
-        window.innerWidth / window.innerHeight,
-        0.05,
-        2000
-      );
-      camera.position.set(0, 1.6, 2.2);
+        if (disposed) return;
 
-      const renderer = new THREE.WebGLRenderer({
-        antialias: true,
-      });
+        // --- Scene ---
+        const scene = new THREE.Scene();
 
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.xr.enabled = true;
+        const camera = new THREE.PerspectiveCamera(
+          65,
+          window.innerWidth / window.innerHeight,
+          0.05,
+          2000
+        );
+        camera.position.set(0, 1.6, 2.2);
 
-      mountRef.current!.appendChild(renderer.domElement);
-      document.body.appendChild(VRButton.createButton(renderer));
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.xr.enabled = true;
 
-      scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
+        // Save renderer so we can clean up
+        rendererRef.current = renderer;
 
-      let splat: any = null;
+        // Mount canvas
+        mountRef.current.innerHTML = "";
+        mountRef.current.appendChild(renderer.domElement);
 
-      async function loadWorld(world: any) {
-        const spz = JSON.stringify(world).match(/https:\/\/[^"]+\.spz/);
-        if (!spz) throw new Error("No .spz found.");
+        // Add VR button (avoid duplicates on HMR / re-mount)
+        if (vrButtonRef.current) {
+          try {
+            vrButtonRef.current.remove();
+          } catch {}
+          vrButtonRef.current = null;
+        }
+        const vrBtn = VRButton.createButton(renderer) as HTMLElement;
+        vrButtonRef.current = vrBtn;
+        document.body.appendChild(vrBtn);
 
-        if (splat) scene.remove(splat);
-        splat = new SplatMesh({ url: spz[0] });
-        scene.add(splat);
+        // Lighting
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1));
+
+        // Resize handling
+        const onResize = () => {
+          if (!rendererRef.current) return;
+          const r = rendererRef.current;
+          camera.aspect = window.innerWidth / window.innerHeight;
+          camera.updateProjectionMatrix();
+          r.setSize(window.innerWidth, window.innerHeight);
+        };
+        window.addEventListener("resize", onResize);
+
+        // Load splat from the WorldLabs world JSON
+        async function loadWorld(world: any) {
+          const match = JSON.stringify(world).match(/https:\/\/[^"]+\.spz/);
+          if (!match) throw new Error("No .spz found in world payload.");
+
+          const url = match[0];
+
+          // Remove prior splat
+          if (splatRef.current) {
+            try {
+              scene.remove(splatRef.current);
+              // Spark meshes are THREE objects; dispose if available
+              splatRef.current?.dispose?.();
+            } catch {}
+            splatRef.current = null;
+          }
+
+          const splat = new SplatMesh({ url });
+          splatRef.current = splat;
+
+          // Optional: tweak orientation/position if needed
+          // splat.position.set(0, 0, -3);
+
+          scene.add(splat);
+        }
+
+        (window as any).loadWorldAssets = loadWorld;
+
+        renderer.setAnimationLoop(() => {
+          renderer.render(scene, camera);
+        });
+
+        setStatus("Ready.");
+      } catch (err: any) {
+        console.error(err);
+        setStatus(`Boot error: ${err?.message || String(err)}`);
       }
-
-      renderer.setAnimationLoop(() => {
-        renderer.render(scene, camera);
-      });
-
-      (window as any).loadWorldAssets = loadWorld;
     }
 
     boot();
+
+    return () => {
+      disposed = true;
+
+      // Stop XR loop + dispose renderer
+      try {
+        if (rendererRef.current) {
+          rendererRef.current.setAnimationLoop(null);
+          rendererRef.current.dispose?.();
+        }
+      } catch {}
+
+      rendererRef.current = null;
+
+      // Remove VR button if present
+      try {
+        if (vrButtonRef.current) vrButtonRef.current.remove();
+      } catch {}
+      vrButtonRef.current = null;
+
+      // Clear splat
+      try {
+        splatRef.current?.dispose?.();
+      } catch {}
+      splatRef.current = null;
+    };
   }, []);
 
   async function generate() {
-    setBusy(true);
-    setStatus("Starting…");
+    try {
+      setBusy(true);
+      setStatus("Starting…");
 
-    const r = await fetch("/api/worlds/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: prompt }),
-    });
+      const r = await fetch("/api/worlds/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: prompt }),
+      });
 
-    const gen = await r.json();
+      if (!r.ok) throw new Error(`Generate failed: ${r.status} ${r.statusText}`);
 
-    const opId = gen.operation_id;
+      const gen = await r.json();
+      const opId = gen.operation_id;
+      if (!opId) throw new Error("No operation_id returned.");
 
-    while (true) {
-      const op = await fetch(`/api/operations/${opId}`, {
-        cache: "no-store",
-      }).then((r) => r.json());
+      // Poll operation until it yields a world_id
+      while (true) {
+        const op = await fetch(`/api/operations/${opId}`, { cache: "no-store" }).then(
+          (x) => x.json()
+        );
 
-      if (op.metadata?.world_id) {
-        const worldId = op.metadata.world_id;
+        if (op?.metadata?.world_id) {
+          const worldId = op.metadata.world_id;
 
-        while (true) {
-          const world = await fetch(`/api/worlds/${worldId}`, {
-            cache: "no-store",
-          }).then((r) => r.json());
+          // Poll world until it contains .spz
+          while (true) {
+            const world = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" }).then(
+              (x) => x.json()
+            );
 
-          if (JSON.stringify(world).includes(".spz")) {
-            setStatus("Loading…");
-            await (window as any).loadWorldAssets(world);
-            setStatus("Ready.");
-            setBusy(false);
-            return;
+            if (JSON.stringify(world).includes(".spz")) {
+              setStatus("Loading…");
+              if (typeof (window as any).loadWorldAssets !== "function") {
+                throw new Error("Renderer not ready yet (loadWorldAssets missing).");
+              }
+              await (window as any).loadWorldAssets(world);
+              setStatus("Ready.");
+              setBusy(false);
+              return;
+            }
+
+            await new Promise((res) => setTimeout(res, 3000));
           }
-
-          await new Promise((r) => setTimeout(r, 3000));
         }
-      }
 
-      await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+    } catch (err: any) {
+      console.error(err);
+      setStatus(`Error: ${err?.message || String(err)}`);
+      setBusy(false);
     }
   }
 
