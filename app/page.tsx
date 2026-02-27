@@ -269,7 +269,7 @@ export default function Home() {
 
           const url = findFirstSpzUrl(world);
           if (!url) {
-            console.log("World payload (no .spz found):", world);
+            // Not an error in polling context, just “not ready yet”
             throw new Error("No .spz found in world payload yet.");
           }
 
@@ -308,7 +308,7 @@ export default function Home() {
           renderer.render(scene, camera);
         });
 
-        // Initial load from URL or cache
+        // Initial load from URL or cache (NO timeout: keep waiting like your old version)
         const params = new URLSearchParams(window.location.search);
         const shared = params.get("world");
         const cached = localStorage.getItem("lastWorld");
@@ -318,36 +318,29 @@ export default function Home() {
           setLastWorldId(initialWorldId);
           setShareUrl(`${window.location.origin}${window.location.pathname}?world=${initialWorldId}`);
 
-          // IMPORTANT: tolerate 404 here too
           setStatus("Waiting world");
           setStatusDetail("Loading saved world…");
 
-          const t0 = Date.now();
-       
-
           let delay = 1200;
-          while (Date.now() - t0 < MAX_MS) {
+          while (true) {
             const resp = await fetch(`/api/worlds/${initialWorldId}`, { cache: "no-store" });
 
             if (resp.ok) {
               const w = await resp.json();
-              const spz = findFirstSpzUrl(w);
-              if (spz) {
+              try {
                 await (window as any).loadWorldAssets(w, { hero: true });
                 break;
+              } catch {
+                // No .spz yet → keep waiting
               }
-            } else if (resp.status !== 404) {
-              // if it’s not a 404, that’s a real error
-              console.warn("Initial world fetch failed:", resp.status);
-              break;
+            } else {
+              // 404 means “not ready yet”; any other status also just keep waiting (like old version)
+              // If you want to stop on non-404 errors, change this behavior.
             }
 
             await sleep(delay);
             delay = Math.min(4500, Math.floor(delay * 1.15));
           }
-
-          setStatus("Ready");
-          setStatusDetail("");
         } else {
           setStatus("Ready");
           setStatusDetail("");
@@ -437,70 +430,48 @@ export default function Home() {
       const opId = gen.operation_id;
       if (!opId) throw new Error("No operation_id returned.");
 
-      // LONGER, and tolerant of 404 world fetches
-      const t0 = Date.now();
-      const MAX_MS = 12 * 60 * 1000; // 12 minutes (demo-safe but won’t false-fail)
-
       let opDelay = 1200;
       let worldDelay = 1500;
 
-      // Poll operation until world_id appears
+      // Poll operation until world_id appears (NO timeout: keep waiting like old version)
       while (true) {
-        if (Date.now() - t0 > MAX_MS) throw new Error("Timed out waiting for generation.");
-
         const opResp = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
-        if (!opResp.ok) {
-          await sleep(opDelay);
-          opDelay = Math.min(3500, Math.floor(opDelay * 1.12));
-          continue;
-        }
 
-        const op = await opResp.json();
+        if (opResp.ok) {
+          const op = await opResp.json();
 
-        if (op?.metadata?.world_id) {
-          const worldId = op.metadata.world_id as string;
+          if (op?.metadata?.world_id) {
+            const worldId = op.metadata.world_id as string;
 
-          setLastWorldId(worldId);
-          localStorage.setItem("lastWorld", worldId);
+            setLastWorldId(worldId);
+            localStorage.setItem("lastWorld", worldId);
 
-          const newShare = `${window.location.origin}${window.location.pathname}?world=${worldId}`;
-          setShareUrl(newShare);
+            const newShare = `${window.location.origin}${window.location.pathname}?world=${worldId}`;
+            setShareUrl(newShare);
 
-          setStatus("Waiting world");
-          setStatusDetail("Generating → preparing assets…");
+            setStatus("Waiting world");
+            setStatusDetail("Generating → preparing assets…");
 
-          // Poll world until .spz is visible; tolerate 404 until it exists
-          while (true) {
-            if (Date.now() - t0 > MAX_MS) throw new Error("Timed out waiting for assets.");
+            // Poll world until .spz exists (tolerate 404; NO timeout)
+            while (true) {
+              const worldResp = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
 
-            const worldResp = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
-
-            if (worldResp.ok) {
-              const world = await worldResp.json();
-              const spz = findFirstSpzUrl(world);
-
-              if (spz) {
-                setStatus("Loading splat");
-                setStatusDetail("Streaming geometry…");
-
-                if (typeof (window as any).loadWorldAssets !== "function") {
-                  throw new Error("Renderer not ready (loadWorldAssets missing).");
+              if (worldResp.ok) {
+                const world = await worldResp.json();
+                try {
+                  await (window as any).loadWorldAssets(world, { hero: true });
+                  setBusy(false);
+                  return;
+                } catch {
+                  // No spz yet → keep waiting
                 }
-
-                await (window as any).loadWorldAssets(world, { hero: true });
-
-                setBusy(false);
-                return;
+              } else {
+                // 404/not ready or other transient error → keep waiting like old version
               }
-            } else {
-              // KEY: 404 means “not ready yet” → keep waiting
-              if (worldResp.status !== 404) {
-                throw new Error(`World fetch failed: ${worldResp.status} ${worldResp.statusText}`);
-              }
+
+              await sleep(worldDelay);
+              worldDelay = Math.min(5500, Math.floor(worldDelay * 1.15));
             }
-
-            await sleep(worldDelay);
-            worldDelay = Math.min(5500, Math.floor(worldDelay * 1.15));
           }
         }
 
@@ -519,7 +490,6 @@ export default function Home() {
     <>
       <div ref={mountRef} style={{ width: "100vw", height: "100vh" }} />
 
-      {/* HUD */}
       <div
         style={{
           position: "absolute",
@@ -644,7 +614,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Subtle fullscreen veil while generating (optional) */}
       {busy && (
         <div
           style={{
