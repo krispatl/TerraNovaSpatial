@@ -46,7 +46,7 @@ export async function generateWorld(req: GenerateRequest) {
       type: "text",
     },
     display_name: req.displayName ?? null,
-    model: req.model ?? "Marble 0.1-plus",
+    model: req.model ?? "Marble 0.1-mini",
     permission: {
       allowed_readers: [],
       allowed_writers: [],
