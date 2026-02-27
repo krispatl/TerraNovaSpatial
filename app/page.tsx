@@ -14,27 +14,63 @@ function clamp(n: number, a: number, b: number) {
 
 /**
  * Prefer structured URL locations if present, otherwise fallback to regex scan.
- * This supports both:
- * - operation.response (WorldLabs op payload)
+ * Supports:
+ * - operation.response payload
  * - /api/worlds/:id payload
  */
 function findFirstSpzUrl(payload: any): string | null {
   try {
-    const structured =
-      payload?.assets?.splats?.spz_urls && Object.values(payload.assets.splats.spz_urls)[0];
-    if (typeof structured === "string" && structured.includes(".spz")) return structured;
-
-    const urls = payload?.assets?.splats?.spz_urls
-      ? (Object.values(payload.assets.splats.spz_urls).filter((u) => typeof u === "string") as string[])
-      : [];
-    const hit = urls.find((u) => u.includes(".spz"));
-    if (hit) return hit;
+    const spzUrls = payload?.assets?.splats?.spz_urls;
+    if (spzUrls && typeof spzUrls === "object") {
+      const vals = Object.values(spzUrls).filter((u) => typeof u === "string") as string[];
+      const hit = vals.find((u) => u.includes(".spz"));
+      if (hit) return hit;
+    }
 
     const s = JSON.stringify(payload);
     const m = s.match(/https:\/\/[^"'\\s]+?\.spz/);
     return m?.[0] ?? null;
   } catch {
     return null;
+  }
+}
+
+function makeFileNameFromUrl(url: string, fallback = "terranova_splat.spz") {
+  try {
+    const u = new URL(url);
+    const base = u.pathname.split("/").pop() || fallback;
+    return base.endsWith(".spz") ? base : `${base}.spz`;
+  } catch {
+    return fallback;
+  }
+}
+
+async function downloadUrl(url: string, filename: string) {
+  // Direct download via blob so it works cross-origin reliably if CORS allows.
+  // If CORS blocks, we fallback to <a href> open-in-new-tab behavior.
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(blobUrl);
+    return;
+  } catch {
+    // fallback: try normal link download/open
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.target = "_blank";
+    a.rel = "noreferrer";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 }
 
@@ -51,16 +87,25 @@ export default function Home() {
   // store pivot group here
   const splatRootRef = useRef<any>(null);
 
+  // current loaded spz
+  const currentSpzUrlRef = useRef<string | null>(null);
+
   // hero cam cancel token
   const camAnimCancelRef = useRef<{ cancel: boolean } | null>(null);
 
   const presets = useMemo(
     () => [
-      "A vast cyberpunk train station in the rain, neon signage, wet reflective floors, cinematic lighting.",
-      "An alien cathedral made of living light, towering arcs, sacred geometry, volumetric glow.",
-      "A brutalist museum atrium, soft skylight, monumental concrete, ultra clean architectural lines.",
-      "A bioluminescent forest with glowing mushrooms, mist, fireflies, dreamlike depth.",
-      "A Barcelona gothic alley at night in the rain, sodium lamps, puddles, moody contrast.",
+      // High-consistency “tech demo” prompts (architecture + lighting + camera cues)
+      "Barcelona Gothic alleyway at night after rain, wet cobblestones, warm sodium street lamps, subtle neon reflections, cinematic depth of field, ultra-detailed, realistic scale.",
+      "Futuristic metro platform, clean design, glossy tiles, soft volumetric light shafts, puddles and reflections, cinematic wide shot, realistic scale, high detail.",
+      "Minimalist sci-fi atrium, white stone + brushed metal, skylight grid, sunbeams with volumetric fog, calm museum-grade lighting, wide-angle composition, realistic scale.",
+      "Industrial warehouse gallery, concrete floor, overhead truss lights, haze, strong perspective lines, cinematic contrast, realistic scale, ultra-detailed.",
+      "Underground tunnel with LED strips, wet floor reflections, moody fog, strong vanishing point, cinematic lighting, realistic scale, high detail.",
+      "Ancient cloister courtyard, arches and columns, soft morning light, light fog, mossy stone, peaceful ambience, cinematic wide shot, realistic scale.",
+      "Cyberpunk street market under a canopy, neon signage, rain mist, reflective puddles, crowd silhouettes, cinematic lighting, realistic scale, detailed textures.",
+      "Mountain observatory plateau at dusk, dramatic clouds, subtle aurora-like glow, wet asphalt, distant lights, cinematic wide shot, realistic scale.",
+      "Brutalist exterior plaza (NOT interior), dramatic overcast sky, wet concrete, strong geometry, moody film lighting, realistic scale, high detail.",
+      "Retro-future research lab corridor, clean panels, soft rim lighting, subtle holographic UI glows, cinematic wide shot, realistic scale, high detail.",
     ],
     []
   );
@@ -75,6 +120,38 @@ export default function Home() {
 
   const [lastWorldId, setLastWorldId] = useState("");
   const [shareUrl, setShareUrl] = useState("");
+
+  // Loading bar progress 0..100
+  const [progress, setProgress] = useState(0);
+  const fakeProgressRef = useRef<number | null>(null);
+
+  function startFakeProgress() {
+    stopFakeProgress();
+    setProgress(2);
+
+    // Never reaches 100; we “finish” when op.done happens.
+    let p = 2;
+    fakeProgressRef.current = window.setInterval(() => {
+      // ease asymptote to ~92
+      const remaining = 92 - p;
+      const step = Math.max(0.15, remaining * 0.02);
+      p = Math.min(92, p + step);
+      setProgress(p);
+    }, 140);
+  }
+
+  function stopFakeProgress() {
+    if (fakeProgressRef.current != null) {
+      window.clearInterval(fakeProgressRef.current);
+      fakeProgressRef.current = null;
+    }
+  }
+
+  function finishProgress() {
+    stopFakeProgress();
+    setProgress(100);
+    window.setTimeout(() => setProgress(0), 450);
+  }
 
   function statusDotColor() {
     switch (status) {
@@ -283,6 +360,8 @@ export default function Home() {
           const url = findFirstSpzUrl(worldPayload);
           if (!url) throw new Error("No .spz found in payload.");
 
+          currentSpzUrlRef.current = url;
+
           // remove old
           if (splatRootRef.current) {
             try {
@@ -319,7 +398,7 @@ export default function Home() {
           renderer.render(scene, camera);
         });
 
-        // Load shared/cached world (single fetch; no infinite wait here)
+        // Load shared/cached world (single fetch; no infinite wait)
         const params = new URLSearchParams(window.location.search);
         const shared = params.get("world");
         const cached = localStorage.getItem("lastWorld");
@@ -327,9 +406,7 @@ export default function Home() {
 
         if (initialWorldId) {
           setLastWorldId(initialWorldId);
-          setShareUrl(
-            `${window.location.origin}${window.location.pathname}?world=${initialWorldId}`
-          );
+          setShareUrl(`${window.location.origin}${window.location.pathname}?world=${initialWorldId}`);
 
           try {
             setStatusDetail("Loading saved world…");
@@ -337,18 +414,14 @@ export default function Home() {
             if (resp.ok) {
               const w = await resp.json();
               await (window as any).loadWorldAssets(w, { hero: true });
-            } else {
-              setStatus("Ready");
-              setStatusDetail("");
             }
           } catch {
-            setStatus("Ready");
-            setStatusDetail("");
+            // ignore
           }
-        } else {
-          setStatus("Ready");
-          setStatusDetail("");
         }
+
+        setStatus("Ready");
+        setStatusDetail("");
 
         return () => {
           window.removeEventListener("resize", onResize);
@@ -370,6 +443,8 @@ export default function Home() {
 
     return () => {
       disposed = true;
+
+      stopFakeProgress();
 
       try {
         cleanup?.();
@@ -417,17 +492,38 @@ export default function Home() {
     }
   }
 
+  async function downloadCurrentSplat() {
+    const url = currentSpzUrlRef.current;
+    if (!url) {
+      setStatusDetail("No splat loaded yet.");
+      setTimeout(() => setStatusDetail(""), 1200);
+      return;
+    }
+
+    try {
+      setStatusDetail("Downloading .spz…");
+      const name = makeFileNameFromUrl(url, lastWorldId ? `world_${lastWorldId}.spz` : "terranova_splat.spz");
+      await downloadUrl(url, name);
+      setStatusDetail("Download started.");
+      setTimeout(() => setStatusDetail(""), 1200);
+    } catch {
+      setStatusDetail("Download failed.");
+      setTimeout(() => setStatusDetail(""), 1500);
+    }
+  }
+
   /**
    * FAST + RELIABLE:
    * - Ask for Marble 0.1-mini
    * - Poll /api/operations/:id until op.done === true
-   * - Use op.response directly (contains splat URLs) instead of waiting on /api/worlds/:id to publish assets
+   * - Use op.response directly (contains splat URLs)
    */
   async function generate() {
     try {
       setBusy(true);
       setStatus("Generating");
       setStatusDetail("Starting…");
+      startFakeProgress();
 
       const r = await fetch("/api/worlds/generate", {
         method: "POST",
@@ -456,15 +552,30 @@ export default function Home() {
 
         const op = await opResp.json();
 
-        // progress (best effort)
-        const progress =
+        // best-effort progress
+        const progressRaw =
           op?.metadata?.progress ??
           op?.metadata?.percent ??
           op?.metadata?.percentage ??
+          op?.progress ??
           null;
 
-        if (progress != null) setStatusDetail(`Generating… ${progress}%`);
-        else setStatusDetail("Generating…");
+        const parsed =
+          typeof progressRaw === "number"
+            ? progressRaw
+            : typeof progressRaw === "string"
+              ? Number(progressRaw)
+              : null;
+
+        if (parsed != null && isFinite(parsed)) {
+          // If backend gives 0..1, normalize; if 0..100 use as-is.
+          const p = parsed <= 1 ? parsed * 100 : parsed;
+          const cp = clamp(p, 0, 99); // hold 100 until done
+          setProgress(cp);
+          setStatusDetail(`Generating… ${Math.round(cp)}%`);
+        } else {
+          setStatusDetail("Generating…");
+        }
 
         if (op?.error) {
           throw new Error(op.error?.message || "World generation failed.");
@@ -487,6 +598,7 @@ export default function Home() {
 
           await (window as any).loadWorldAssets(world, { hero: true });
 
+          finishProgress();
           setBusy(false);
           return;
         }
@@ -495,33 +607,70 @@ export default function Home() {
       }
     } catch (err: any) {
       console.error(err);
+      stopFakeProgress();
+      setProgress(0);
       setStatus("Error");
       setStatusDetail(err?.message || String(err));
       setBusy(false);
     }
   }
 
+  const panelStyle: React.CSSProperties = {
+    position: "absolute",
+    top: 16,
+    left: 16,
+    width: 520,
+    maxWidth: "calc(100vw - 32px)",
+    background:
+      "linear-gradient(180deg, rgba(12,12,14,0.78), rgba(12,12,14,0.56))",
+    border: "1px solid rgba(255,255,255,0.10)",
+    padding: 14,
+    borderRadius: 16,
+    color: "rgba(255,255,255,0.92)",
+    backdropFilter: "blur(14px)",
+    boxShadow: "0 24px 80px rgba(0,0,0,0.55)",
+    fontFamily:
+      'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"',
+  };
+
+  const chipStyle = (active: boolean): React.CSSProperties => ({
+    cursor: "pointer",
+    fontSize: 12,
+    padding: "8px 10px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.14)",
+    background: active ? "rgba(183,185,255,0.20)" : "rgba(255,255,255,0.06)",
+    color: "rgba(255,255,255,0.92)",
+    whiteSpace: "nowrap",
+  });
+
+  const buttonStyle = (variant: "primary" | "secondary" | "danger" = "secondary"): React.CSSProperties => {
+    const bg =
+      variant === "primary"
+        ? "rgba(124,255,178,0.18)"
+        : variant === "danger"
+          ? "rgba(255,120,120,0.16)"
+          : "rgba(124,180,255,0.14)";
+    return {
+      cursor: "pointer",
+      padding: "10px 12px",
+      borderRadius: 12,
+      border: "1px solid rgba(255,255,255,0.14)",
+      background: bg,
+      color: "rgba(255,255,255,0.92)",
+      fontWeight: 700,
+      letterSpacing: 0.2,
+      userSelect: "none",
+    };
+  };
+
   return (
     <>
       <div ref={mountRef} style={{ width: "100vw", height: "100vh" }} />
 
-      <div
-        style={{
-          position: "absolute",
-          top: 18,
-          left: 18,
-          width: 480,
-          background: "rgba(0,0,0,0.62)",
-          border: "1px solid rgba(255,255,255,0.10)",
-          padding: 14,
-          borderRadius: 14,
-          color: "rgba(255,255,255,0.92)",
-          backdropFilter: "blur(10px)",
-          boxShadow: "0 18px 50px rgba(0,0,0,0.45)",
-          fontFamily:
-            'ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji"',
-        }}
-      >
+      {/* HUD */}
+      <div style={panelStyle}>
+        {/* header */}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div
             style={{
@@ -529,106 +678,130 @@ export default function Home() {
               height: 10,
               borderRadius: 99,
               background: statusDotColor(),
-              boxShadow: "0 0 16px rgba(255,255,255,0.25)",
+              boxShadow: "0 0 18px rgba(255,255,255,0.18)",
             }}
           />
-          <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>TERRANOVA SPATIAL</div>
+          <div style={{ fontWeight: 800, letterSpacing: 0.35 }}>TERRANOVA SPATIAL</div>
           <div style={{ marginLeft: "auto", opacity: 0.75, fontSize: 12 }}>
             {lastWorldId ? `World ${lastWorldId.slice(0, 8)}…` : "—"}
           </div>
         </div>
 
-        <div style={{ marginTop: 8, opacity: 0.78, fontSize: 13 }}>
-          Status: <span style={{ fontWeight: 600 }}>{status}</span>
+        {/* progress bar */}
+        {busy && (
+          <div style={{ marginTop: 10 }}>
+            <div
+              style={{
+                height: 8,
+                borderRadius: 999,
+                background: "rgba(255,255,255,0.08)",
+                border: "1px solid rgba(255,255,255,0.10)",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: `${Math.max(2, Math.min(100, progress))}%`,
+                  borderRadius: 999,
+                  background:
+                    "linear-gradient(90deg, rgba(183,185,255,0.55), rgba(124,255,178,0.55))",
+                  transition: "width 180ms ease",
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* status */}
+        <div style={{ marginTop: 10, opacity: 0.82, fontSize: 13 }}>
+          Status: <span style={{ fontWeight: 700 }}>{status}</span>
           {statusDetail ? <span style={{ opacity: 0.85 }}> — {statusDetail}</span> : null}
         </div>
 
+        {/* chips */}
         <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
           {presets.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPrompt(p)}
-              style={{
-                cursor: "pointer",
-                fontSize: 12,
-                padding: "8px 10px",
-                borderRadius: 999,
-                border: "1px solid rgba(255,255,255,0.14)",
-                background: prompt === p ? "rgba(183,185,255,0.22)" : "rgba(255,255,255,0.06)",
-                color: "rgba(255,255,255,0.92)",
-              }}
-            >
-              {p.length > 28 ? p.slice(0, 28) + "…" : p}
+            <button key={p} onClick={() => setPrompt(p)} style={chipStyle(prompt === p)}>
+              {p.length > 34 ? p.slice(0, 34) + "…" : p}
             </button>
           ))}
         </div>
 
+        {/* prompt editor */}
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           style={{
             marginTop: 10,
             width: "100%",
-            height: 86,
+            height: 96,
             resize: "none",
-            borderRadius: 12,
-            padding: 10,
+            borderRadius: 14,
+            padding: 12,
             border: "1px solid rgba(255,255,255,0.12)",
-            background: "rgba(0,0,0,0.35)",
+            background: "rgba(0,0,0,0.32)",
             color: "rgba(255,255,255,0.92)",
             outline: "none",
             lineHeight: 1.25,
           }}
         />
 
-        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+        {/* actions */}
+        <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
           <button
             onClick={generate}
             disabled={busy}
             style={{
-              cursor: busy ? "not-allowed" : "pointer",
+              ...buttonStyle("primary"),
               flex: 1,
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: busy ? "rgba(255,255,255,0.08)" : "rgba(124,255,178,0.18)",
-              color: "rgba(255,255,255,0.92)",
-              fontWeight: 700,
-              letterSpacing: 0.2,
+              minWidth: 200,
+              opacity: busy ? 0.6 : 1,
+              cursor: busy ? "not-allowed" : "pointer",
             }}
           >
-            {busy ? "Generating…" : "Generate World (Fast)"}
+            {busy ? "Generating…" : "Generate World"}
           </button>
 
           <button
             onClick={copyShareLink}
             disabled={!lastWorldId}
             style={{
+              ...buttonStyle("secondary"),
+              opacity: !lastWorldId ? 0.5 : 1,
               cursor: !lastWorldId ? "not-allowed" : "pointer",
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: !lastWorldId ? "rgba(255,255,255,0.06)" : "rgba(124,180,255,0.16)",
-              color: "rgba(255,255,255,0.92)",
-              fontWeight: 700,
             }}
             title={shareUrl || ""}
           >
             Share
           </button>
+
+          <button
+            onClick={downloadCurrentSplat}
+            disabled={!currentSpzUrlRef.current}
+            style={{
+              ...buttonStyle("secondary"),
+              opacity: currentSpzUrlRef.current ? 1 : 0.5,
+              cursor: currentSpzUrlRef.current ? "pointer" : "not-allowed",
+            }}
+            title={currentSpzUrlRef.current || ""}
+          >
+            Download .spz
+          </button>
         </div>
 
         {shareUrl ? (
-          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75, wordBreak: "break-all" }}>
+          <div style={{ marginTop: 8, fontSize: 12, opacity: 0.70, wordBreak: "break-all" }}>
             {shareUrl}
           </div>
         ) : null}
 
-        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.65 }}>
-          Tip: drag to orbit, scroll to zoom. VR button appears when supported.
+        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.62 }}>
+          Drag to orbit • Scroll to zoom • VR button appears when supported
         </div>
       </div>
 
+      {/* subtle generation veil */}
       {busy && (
         <div
           style={{
@@ -636,7 +809,7 @@ export default function Home() {
             inset: 0,
             pointerEvents: "none",
             background:
-              "radial-gradient(1200px 700px at 20% 20%, rgba(183,185,255,0.10), rgba(0,0,0,0.0) 60%), rgba(0,0,0,0.18)",
+              "radial-gradient(900px 520px at 20% 20%, rgba(183,185,255,0.10), rgba(0,0,0,0.0) 60%), rgba(0,0,0,0.18)",
           }}
         />
       )}
