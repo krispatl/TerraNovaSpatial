@@ -8,7 +8,10 @@ export async function POST(req: Request) {
     if (!text) return NextResponse.json({ error: "Missing 'text' prompt." }, { status: 400 });
 
     const displayName = typeof body?.displayName === "string" ? body.displayName : null;
-    const model = body?.model === "Marble 0.1-mini" ? "Marble 0.1-mini" : "Marble 0.1-plus";
+    const model =
+  typeof body?.model === "string" && body.model.includes("mini")
+    ? "Marble 0.1-mini"
+    : "Marble 0.1-mini"; // default to the mini model for speed
     const seed = typeof body?.seed === "number" ? body.seed : null;
 
     const out = await generateWorld({ text, displayName: displayName ?? undefined, model, seed: seed ?? undefined });
