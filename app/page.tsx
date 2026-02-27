@@ -12,9 +12,25 @@ function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
 
-function findFirstSpzUrl(world: any): string | null {
+/**
+ * Prefer structured URL locations if present, otherwise fallback to regex scan.
+ * This supports both:
+ * - operation.response (WorldLabs op payload)
+ * - /api/worlds/:id payload
+ */
+function findFirstSpzUrl(payload: any): string | null {
   try {
-    const s = JSON.stringify(world);
+    const structured =
+      payload?.assets?.splats?.spz_urls && Object.values(payload.assets.splats.spz_urls)[0];
+    if (typeof structured === "string" && structured.includes(".spz")) return structured;
+
+    const urls = payload?.assets?.splats?.spz_urls
+      ? (Object.values(payload.assets.splats.spz_urls).filter((u) => typeof u === "string") as string[])
+      : [];
+    const hit = urls.find((u) => u.includes(".spz"));
+    if (hit) return hit;
+
+    const s = JSON.stringify(payload);
     const m = s.match(/https:\/\/[^"'\\s]+?\.spz/);
     return m?.[0] ?? null;
   } catch {
@@ -53,7 +69,7 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
 
   const [status, setStatus] = useState<
-    "Idle" | "Booting" | "Ready" | "Generating" | "Waiting world" | "Loading splat" | "Error"
+    "Idle" | "Booting" | "Ready" | "Generating" | "Loading splat" | "Error"
   >("Idle");
   const [statusDetail, setStatusDetail] = useState("");
 
@@ -67,7 +83,6 @@ export default function Home() {
       case "Error":
         return "rgba(255,120,120,0.95)";
       case "Generating":
-      case "Waiting world":
       case "Loading splat":
       case "Booting":
         return "rgba(255,210,120,0.95)";
@@ -88,9 +103,7 @@ export default function Home() {
 
         const THREE = await import("three");
         const { VRButton } = await import("three/examples/jsm/webxr/VRButton.js");
-        const { OrbitControls } = await import(
-          "three/examples/jsm/controls/OrbitControls.js"
-        );
+        const { OrbitControls } = await import("three/examples/jsm/controls/OrbitControls.js");
         const { SplatMesh } = await import("@sparkjsdev/spark");
 
         if (disposed) return;
@@ -264,14 +277,11 @@ export default function Home() {
           }
         }
 
-        async function loadWorldAssets(world: AnyObj, opts?: { hero?: boolean }) {
+        async function loadWorldAssets(worldPayload: AnyObj, opts?: { hero?: boolean }) {
           const hero = opts?.hero ?? true;
 
-          const url = findFirstSpzUrl(world);
-          if (!url) {
-            // Not an error in polling context, just “not ready yet”
-            throw new Error("No .spz found in world payload yet.");
-          }
+          const url = findFirstSpzUrl(worldPayload);
+          if (!url) throw new Error("No .spz found in payload.");
 
           // remove old
           if (splatRootRef.current) {
@@ -285,8 +295,9 @@ export default function Home() {
           setStatus("Loading splat");
           setStatusDetail("Streaming gaussian splats…");
 
+          // Upright fix
           const pivot = new THREE.Group();
-          pivot.rotation.x = Math.PI; // upright fix
+          pivot.rotation.x = Math.PI;
 
           const splat = new SplatMesh({ url });
           pivot.add(splat);
@@ -308,7 +319,7 @@ export default function Home() {
           renderer.render(scene, camera);
         });
 
-        // Initial load from URL or cache (NO timeout: keep waiting like your old version)
+        // Load shared/cached world (single fetch; no infinite wait here)
         const params = new URLSearchParams(window.location.search);
         const shared = params.get("world");
         const cached = localStorage.getItem("lastWorld");
@@ -316,30 +327,23 @@ export default function Home() {
 
         if (initialWorldId) {
           setLastWorldId(initialWorldId);
-          setShareUrl(`${window.location.origin}${window.location.pathname}?world=${initialWorldId}`);
+          setShareUrl(
+            `${window.location.origin}${window.location.pathname}?world=${initialWorldId}`
+          );
 
-          setStatus("Waiting world");
-          setStatusDetail("Loading saved world…");
-
-          let delay = 1200;
-          while (true) {
+          try {
+            setStatusDetail("Loading saved world…");
             const resp = await fetch(`/api/worlds/${initialWorldId}`, { cache: "no-store" });
-
             if (resp.ok) {
               const w = await resp.json();
-              try {
-                await (window as any).loadWorldAssets(w, { hero: true });
-                break;
-              } catch {
-                // No .spz yet → keep waiting
-              }
+              await (window as any).loadWorldAssets(w, { hero: true });
             } else {
-              // 404 means “not ready yet”; any other status also just keep waiting (like old version)
-              // If you want to stop on non-404 errors, change this behavior.
+              setStatus("Ready");
+              setStatusDetail("");
             }
-
-            await sleep(delay);
-            delay = Math.min(4500, Math.floor(delay * 1.15));
+          } catch {
+            setStatus("Ready");
+            setStatusDetail("");
           }
         } else {
           setStatus("Ready");
@@ -413,70 +417,81 @@ export default function Home() {
     }
   }
 
+  /**
+   * FAST + RELIABLE:
+   * - Ask for Marble 0.1-mini
+   * - Poll /api/operations/:id until op.done === true
+   * - Use op.response directly (contains splat URLs) instead of waiting on /api/worlds/:id to publish assets
+   */
   async function generate() {
     try {
       setBusy(true);
       setStatus("Generating");
-      setStatusDetail("Queued → generating world…");
+      setStatusDetail("Starting…");
 
       const r = await fetch("/api/worlds/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: prompt }),
+        body: JSON.stringify({
+          text: prompt,
+          model: "Marble 0.1-mini",
+        }),
       });
+
       if (!r.ok) throw new Error(`Generate failed: ${r.status} ${r.statusText}`);
 
       const gen = await r.json();
       const opId = gen.operation_id;
       if (!opId) throw new Error("No operation_id returned.");
 
-      let opDelay = 1200;
-      let worldDelay = 1500;
+      const POLL_MS = 1200;
 
-      // Poll operation until world_id appears (NO timeout: keep waiting like old version)
       while (true) {
         const opResp = await fetch(`/api/operations/${opId}`, { cache: "no-store" });
-
-        if (opResp.ok) {
-          const op = await opResp.json();
-
-          if (op?.metadata?.world_id) {
-            const worldId = op.metadata.world_id as string;
-
-            setLastWorldId(worldId);
-            localStorage.setItem("lastWorld", worldId);
-
-            const newShare = `${window.location.origin}${window.location.pathname}?world=${worldId}`;
-            setShareUrl(newShare);
-
-            setStatus("Waiting world");
-            setStatusDetail("Generating → preparing assets…");
-
-            // Poll world until .spz exists (tolerate 404; NO timeout)
-            while (true) {
-              const worldResp = await fetch(`/api/worlds/${worldId}`, { cache: "no-store" });
-
-              if (worldResp.ok) {
-                const world = await worldResp.json();
-                try {
-                  await (window as any).loadWorldAssets(world, { hero: true });
-                  setBusy(false);
-                  return;
-                } catch {
-                  // No spz yet → keep waiting
-                }
-              } else {
-                // 404/not ready or other transient error → keep waiting like old version
-              }
-
-              await sleep(worldDelay);
-              worldDelay = Math.min(5500, Math.floor(worldDelay * 1.15));
-            }
-          }
+        if (!opResp.ok) {
+          setStatusDetail(`Polling operation… (${opResp.status})`);
+          await sleep(POLL_MS);
+          continue;
         }
 
-        await sleep(opDelay);
-        opDelay = Math.min(3500, Math.floor(opDelay * 1.12));
+        const op = await opResp.json();
+
+        // progress (best effort)
+        const progress =
+          op?.metadata?.progress ??
+          op?.metadata?.percent ??
+          op?.metadata?.percentage ??
+          null;
+
+        if (progress != null) setStatusDetail(`Generating… ${progress}%`);
+        else setStatusDetail("Generating…");
+
+        if (op?.error) {
+          throw new Error(op.error?.message || "World generation failed.");
+        }
+
+        if (op?.done) {
+          const world = op?.response;
+          if (!world) throw new Error("Operation done but response missing.");
+
+          const worldId = world?.world_id || op?.metadata?.world_id || "";
+          if (worldId) {
+            setLastWorldId(worldId);
+            localStorage.setItem("lastWorld", worldId);
+            const newShare = `${window.location.origin}${window.location.pathname}?world=${worldId}`;
+            setShareUrl(newShare);
+          }
+
+          setStatus("Loading splat");
+          setStatusDetail("Loading final assets…");
+
+          await (window as any).loadWorldAssets(world, { hero: true });
+
+          setBusy(false);
+          return;
+        }
+
+        await sleep(POLL_MS);
       }
     } catch (err: any) {
       console.error(err);
@@ -582,7 +597,7 @@ export default function Home() {
               letterSpacing: 0.2,
             }}
           >
-            {busy ? "Generating…" : "Generate World"}
+            {busy ? "Generating…" : "Generate World (Fast)"}
           </button>
 
           <button
