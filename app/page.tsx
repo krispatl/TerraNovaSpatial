@@ -31,10 +31,7 @@ function pickSpzUrl(payload: any, choice: SplatResChoice): { url: string | null;
 
       const map = new Map(entries);
 
-      const tryKeys =
-        choice === "auto"
-          ? ["500k", "100k", "full_res"]
-          : [choice];
+      const tryKeys = choice === "auto" ? ["500k", "100k", "full_res"] : [choice];
 
       for (const k of tryKeys) {
         if (map.has(k)) return { url: map.get(k)!, key: k };
@@ -79,6 +76,7 @@ async function downloadUrl(url: string, filename: string) {
     URL.revokeObjectURL(blobUrl);
     return;
   } catch {
+    // fallback
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
@@ -105,21 +103,27 @@ export default function Home() {
 
   const camAnimCancelRef = useRef<{ cancel: boolean } | null>(null);
 
+  // progress bar
+  const [progress, setProgress] = useState(0);
+  const fakeProgressRef = useRef<number | null>(null);
+
   const presets = useMemo(
     () => [
       "Barcelona Gothic alleyway at night after rain, wet cobblestones, warm sodium street lamps, subtle neon reflections, cinematic depth of field, realistic scale, ultra-detailed.",
-      "Futuristic metro platform, glossy tiles, soft volumetric light shafts, puddles and reflections, cinematic wide shot, realistic scale, high detail.",
-      "Minimalist sci-fi atrium, white stone + brushed metal, skylight grid, sunbeams with volumetric fog, calm museum-grade lighting, wide-angle, realistic scale.",
-      "Industrial warehouse gallery, concrete floor, overhead truss lights, haze, strong perspective lines, cinematic contrast, realistic scale.",
-      "Underground tunnel with LED strips, wet floor reflections, moody fog, strong vanishing point, cinematic lighting, realistic scale.",
+      "Futuristic metro platform, clean design, glossy tiles, soft volumetric light shafts, puddles and reflections, cinematic wide shot, realistic scale, high detail.",
+      "Minimalist sci-fi atrium, white stone + brushed metal, skylight grid, sunbeams with volumetric fog, calm museum-grade lighting, wide-angle composition, realistic scale.",
+      "Industrial warehouse gallery, concrete floor, overhead truss lights, haze, strong perspective lines, cinematic contrast, realistic scale, ultra-detailed.",
+      "Underground tunnel with LED strips, wet floor reflections, moody fog, strong vanishing point, cinematic lighting, realistic scale, high detail.",
+      "Ancient cloister courtyard, arches and columns, soft morning light, light fog, mossy stone, peaceful ambience, cinematic wide shot, realistic scale, detailed.",
       "Cyberpunk street market under a canopy, neon signage, rain mist, reflective puddles, crowd silhouettes, cinematic lighting, realistic scale, detailed textures.",
+      "Brutalist exterior plaza (NOT interior), dramatic overcast sky, wet concrete, strong geometry, moody film lighting, realistic scale, high detail.",
     ],
     []
   );
 
   const [prompt, setPrompt] = useState(presets[0]);
 
-  // NEW: model + splat resolution dropdowns
+  // dropdowns
   const [modelChoice, setModelChoice] = useState<ModelChoice>("Marble 0.1-mini");
   const [splatResChoice, setSplatResChoice] = useState<SplatResChoice>("auto");
 
@@ -132,27 +136,27 @@ export default function Home() {
   const [lastWorldId, setLastWorldId] = useState("");
   const [shareUrl, setShareUrl] = useState("");
 
-  // progress bar
-  const [progress, setProgress] = useState(0);
-  const fakeProgressRef = useRef<number | null>(null);
-
-  function startFakeProgress() {
-    stopFakeProgress();
-    setProgress(2);
-    let p = 2;
-    fakeProgressRef.current = window.setInterval(() => {
-      const remaining = 92 - p;
-      const step = Math.max(0.15, remaining * 0.02);
-      p = Math.min(92, p + step);
-      setProgress(p);
-    }, 140);
-  }
   function stopFakeProgress() {
     if (fakeProgressRef.current != null) {
       window.clearInterval(fakeProgressRef.current);
       fakeProgressRef.current = null;
     }
   }
+
+  function startFakeProgress() {
+    stopFakeProgress();
+    setProgress(2);
+
+    let p = 2;
+    fakeProgressRef.current = window.setInterval(() => {
+      // asymptote to 92
+      const remaining = 92 - p;
+      const step = Math.max(0.15, remaining * 0.02);
+      p = Math.min(92, p + step);
+      setProgress(p);
+    }, 140);
+  }
+
   function finishProgress() {
     stopFakeProgress();
     setProgress(100);
@@ -375,9 +379,7 @@ export default function Home() {
           }
 
           setStatus("Loading splat");
-          setStatusDetail(
-            picked.key ? `Streaming splat (${picked.key})…` : "Streaming gaussian splats…"
-          );
+          setStatusDetail(picked.key ? `Streaming splat (${picked.key})…` : "Streaming gaussian splats…");
 
           // Upright fix
           const pivot = new THREE.Group();
@@ -448,9 +450,11 @@ export default function Home() {
     return () => {
       disposed = true;
       stopFakeProgress();
+
       try {
         cleanup?.();
       } catch {}
+
       try {
         if (rendererRef.current) {
           rendererRef.current.setAnimationLoop(null);
@@ -477,7 +481,7 @@ export default function Home() {
       cameraRef.current = null;
       sceneRef.current = null;
     };
-  }, [splatResChoice]); // re-pick url on next load when selection changes
+  }, [splatResChoice]);
 
   async function copyShareLink() {
     try {
@@ -600,23 +604,11 @@ export default function Home() {
     }
   }
 
-  function startFakeProgress() {
-    stopFakeProgress();
-    setProgress(2);
-    let p = 2;
-    fakeProgressRef.current = window.setInterval(() => {
-      const remaining = 92 - p;
-      const step = Math.max(0.15, remaining * 0.02);
-      p = Math.min(92, p + step);
-      setProgress(p);
-    }, 140);
-  }
-
   const panelStyle: React.CSSProperties = {
     position: "absolute",
     top: 16,
     left: 16,
-    width: 560,
+    width: 580,
     maxWidth: "calc(100vw - 32px)",
     background: "linear-gradient(180deg, rgba(12,12,14,0.78), rgba(12,12,14,0.56))",
     border: "1px solid rgba(255,255,255,0.10)",
@@ -652,6 +644,7 @@ export default function Home() {
       fontWeight: 700,
       letterSpacing: 0.2,
       userSelect: "none",
+      opacity: 1,
     };
   };
 
@@ -670,7 +663,6 @@ export default function Home() {
       <div ref={mountRef} style={{ width: "100vw", height: "100vh" }} />
 
       <div style={panelStyle}>
-        {/* header */}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div
             style={{
@@ -687,7 +679,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* progress */}
         {busy && (
           <div style={{ marginTop: 10 }}>
             <div
@@ -713,13 +704,12 @@ export default function Home() {
           </div>
         )}
 
-        {/* status */}
         <div style={{ marginTop: 10, opacity: 0.82, fontSize: 13 }}>
           Status: <span style={{ fontWeight: 700 }}>{status}</span>
           {statusDetail ? <span style={{ opacity: 0.85 }}> — {statusDetail}</span> : null}
         </div>
 
-        {/* NEW: controls row */}
+        {/* dropdowns */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
           <div>
             <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>World model</div>
@@ -727,18 +717,19 @@ export default function Home() {
               value={modelChoice}
               onChange={(e) => setModelChoice(e.target.value as ModelChoice)}
               style={selectStyle}
+              disabled={busy}
             >
               <option value="Marble 0.1-mini">Marble 0.1-mini (fast)</option>
               <option value="Marble 0.1-plus">Marble 0.1-plus (higher quality)</option>
             </select>
           </div>
-
           <div>
             <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>Splat resolution</div>
             <select
               value={splatResChoice}
               onChange={(e) => setSplatResChoice(e.target.value as SplatResChoice)}
               style={selectStyle}
+              disabled={busy}
             >
               <option value="auto">Auto (best available)</option>
               <option value="100k">100k (fastest)</option>
@@ -751,13 +742,12 @@ export default function Home() {
         {/* chips */}
         <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
           {presets.map((p) => (
-            <button key={p} onClick={() => setPrompt(p)} style={chipStyle(prompt === p)}>
+            <button key={p} onClick={() => setPrompt(p)} style={chipStyle(prompt === p)} disabled={busy}>
               {p.length > 34 ? p.slice(0, 34) + "…" : p}
             </button>
           ))}
         </div>
 
-        {/* prompt */}
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
@@ -774,6 +764,7 @@ export default function Home() {
             outline: "none",
             lineHeight: 1.25,
           }}
+          disabled={busy}
         />
 
         {/* actions */}
