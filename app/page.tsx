@@ -12,26 +12,45 @@ function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
 
+type ModelChoice = "Marble 0.1-mini" | "Marble 0.1-plus";
+type SplatResChoice = "auto" | "100k" | "500k" | "full_res";
+
 /**
- * Prefer structured URL locations if present, otherwise fallback to regex scan.
- * Supports:
- * - operation.response payload
- * - /api/worlds/:id payload
+ * Pick a .spz URL from a world payload based on a requested resolution key.
+ * - If choice is "auto", we pick best available order: 500k -> 100k -> full_res -> first found.
  */
-function findFirstSpzUrl(payload: any): string | null {
+function pickSpzUrl(payload: any, choice: SplatResChoice): { url: string | null; key?: string } {
   try {
     const spzUrls = payload?.assets?.splats?.spz_urls;
     if (spzUrls && typeof spzUrls === "object") {
-      const vals = Object.values(spzUrls).filter((u) => typeof u === "string") as string[];
-      const hit = vals.find((u) => u.includes(".spz"));
-      if (hit) return hit;
+      const entries = Object.entries(spzUrls).filter(
+        ([, v]) => typeof v === "string" && (v as string).includes(".spz")
+      ) as Array<[string, string]>;
+
+      if (entries.length === 0) return { url: null };
+
+      const map = new Map(entries);
+
+      const tryKeys =
+        choice === "auto"
+          ? ["500k", "100k", "full_res"]
+          : [choice];
+
+      for (const k of tryKeys) {
+        if (map.has(k)) return { url: map.get(k)!, key: k };
+      }
+
+      // fallback: first available
+      const [k0, u0] = entries[0];
+      return { url: u0, key: k0 };
     }
 
+    // Fallback regex scan
     const s = JSON.stringify(payload);
     const m = s.match(/https:\/\/[^"'\\s]+?\.spz/);
-    return m?.[0] ?? null;
+    return { url: m?.[0] ?? null };
   } catch {
-    return null;
+    return { url: null };
   }
 }
 
@@ -46,8 +65,6 @@ function makeFileNameFromUrl(url: string, fallback = "terranova_splat.spz") {
 }
 
 async function downloadUrl(url: string, filename: string) {
-  // Direct download via blob so it works cross-origin reliably if CORS allows.
-  // If CORS blocks, we fallback to <a href> open-in-new-tab behavior.
   try {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`Download failed: ${res.status}`);
@@ -62,7 +79,6 @@ async function downloadUrl(url: string, filename: string) {
     URL.revokeObjectURL(blobUrl);
     return;
   } catch {
-    // fallback: try normal link download/open
     const a = document.createElement("a");
     a.href = url;
     a.download = filename;
@@ -84,35 +100,30 @@ export default function Home() {
   const sceneRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
 
-  // store pivot group here
   const splatRootRef = useRef<any>(null);
-
-  // current loaded spz
   const currentSpzUrlRef = useRef<string | null>(null);
 
-  // hero cam cancel token
   const camAnimCancelRef = useRef<{ cancel: boolean } | null>(null);
 
   const presets = useMemo(
     () => [
-      // High-consistency “tech demo” prompts (architecture + lighting + camera cues)
-      "Barcelona Gothic alleyway at night after rain, wet cobblestones, warm sodium street lamps, subtle neon reflections, cinematic depth of field, ultra-detailed, realistic scale.",
-      "Futuristic metro platform, clean design, glossy tiles, soft volumetric light shafts, puddles and reflections, cinematic wide shot, realistic scale, high detail.",
-      "Minimalist sci-fi atrium, white stone + brushed metal, skylight grid, sunbeams with volumetric fog, calm museum-grade lighting, wide-angle composition, realistic scale.",
-      "Industrial warehouse gallery, concrete floor, overhead truss lights, haze, strong perspective lines, cinematic contrast, realistic scale, ultra-detailed.",
-      "Underground tunnel with LED strips, wet floor reflections, moody fog, strong vanishing point, cinematic lighting, realistic scale, high detail.",
-      "Ancient cloister courtyard, arches and columns, soft morning light, light fog, mossy stone, peaceful ambience, cinematic wide shot, realistic scale.",
+      "Barcelona Gothic alleyway at night after rain, wet cobblestones, warm sodium street lamps, subtle neon reflections, cinematic depth of field, realistic scale, ultra-detailed.",
+      "Futuristic metro platform, glossy tiles, soft volumetric light shafts, puddles and reflections, cinematic wide shot, realistic scale, high detail.",
+      "Minimalist sci-fi atrium, white stone + brushed metal, skylight grid, sunbeams with volumetric fog, calm museum-grade lighting, wide-angle, realistic scale.",
+      "Industrial warehouse gallery, concrete floor, overhead truss lights, haze, strong perspective lines, cinematic contrast, realistic scale.",
+      "Underground tunnel with LED strips, wet floor reflections, moody fog, strong vanishing point, cinematic lighting, realistic scale.",
       "Cyberpunk street market under a canopy, neon signage, rain mist, reflective puddles, crowd silhouettes, cinematic lighting, realistic scale, detailed textures.",
-      "Mountain observatory plateau at dusk, dramatic clouds, subtle aurora-like glow, wet asphalt, distant lights, cinematic wide shot, realistic scale.",
-      "Brutalist exterior plaza (NOT interior), dramatic overcast sky, wet concrete, strong geometry, moody film lighting, realistic scale, high detail.",
-      "Retro-future research lab corridor, clean panels, soft rim lighting, subtle holographic UI glows, cinematic wide shot, realistic scale, high detail.",
     ],
     []
   );
 
   const [prompt, setPrompt] = useState(presets[0]);
-  const [busy, setBusy] = useState(false);
 
+  // NEW: model + splat resolution dropdowns
+  const [modelChoice, setModelChoice] = useState<ModelChoice>("Marble 0.1-mini");
+  const [splatResChoice, setSplatResChoice] = useState<SplatResChoice>("auto");
+
+  const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<
     "Idle" | "Booting" | "Ready" | "Generating" | "Loading splat" | "Error"
   >("Idle");
@@ -121,32 +132,27 @@ export default function Home() {
   const [lastWorldId, setLastWorldId] = useState("");
   const [shareUrl, setShareUrl] = useState("");
 
-  // Loading bar progress 0..100
+  // progress bar
   const [progress, setProgress] = useState(0);
   const fakeProgressRef = useRef<number | null>(null);
 
   function startFakeProgress() {
     stopFakeProgress();
     setProgress(2);
-
-    // Never reaches 100; we “finish” when op.done happens.
     let p = 2;
     fakeProgressRef.current = window.setInterval(() => {
-      // ease asymptote to ~92
       const remaining = 92 - p;
       const step = Math.max(0.15, remaining * 0.02);
       p = Math.min(92, p + step);
       setProgress(p);
     }, 140);
   }
-
   function stopFakeProgress() {
     if (fakeProgressRef.current != null) {
       window.clearInterval(fakeProgressRef.current);
       fakeProgressRef.current = null;
     }
   }
-
   function finishProgress() {
     stopFakeProgress();
     setProgress(100);
@@ -201,7 +207,6 @@ export default function Home() {
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 
-        // demo look
         renderer.outputColorSpace = THREE.SRGBColorSpace;
         renderer.toneMapping = THREE.ACESFilmicToneMapping;
         renderer.toneMappingExposure = 1.25;
@@ -323,7 +328,6 @@ export default function Home() {
           box.getCenter(center);
           box.getSize(size);
 
-          // “standing” target
           const target = new THREE.Vector3(center.x, box.min.y + size.y * 0.25, center.z);
 
           const radius = Math.max(size.x, size.y, size.z) * 0.5;
@@ -357,10 +361,9 @@ export default function Home() {
         async function loadWorldAssets(worldPayload: AnyObj, opts?: { hero?: boolean }) {
           const hero = opts?.hero ?? true;
 
-          const url = findFirstSpzUrl(worldPayload);
-          if (!url) throw new Error("No .spz found in payload.");
-
-          currentSpzUrlRef.current = url;
+          const picked = pickSpzUrl(worldPayload, splatResChoice);
+          if (!picked.url) throw new Error("No .spz found in payload.");
+          currentSpzUrlRef.current = picked.url;
 
           // remove old
           if (splatRootRef.current) {
@@ -372,13 +375,15 @@ export default function Home() {
           }
 
           setStatus("Loading splat");
-          setStatusDetail("Streaming gaussian splats…");
+          setStatusDetail(
+            picked.key ? `Streaming splat (${picked.key})…` : "Streaming gaussian splats…"
+          );
 
           // Upright fix
           const pivot = new THREE.Group();
           pivot.rotation.x = Math.PI;
 
-          const splat = new SplatMesh({ url });
+          const splat = new SplatMesh({ url: picked.url });
           pivot.add(splat);
 
           scene.add(pivot);
@@ -398,7 +403,7 @@ export default function Home() {
           renderer.render(scene, camera);
         });
 
-        // Load shared/cached world (single fetch; no infinite wait)
+        // Load shared/cached world
         const params = new URLSearchParams(window.location.search);
         const shared = params.get("world");
         const cached = localStorage.getItem("lastWorld");
@@ -407,7 +412,6 @@ export default function Home() {
         if (initialWorldId) {
           setLastWorldId(initialWorldId);
           setShareUrl(`${window.location.origin}${window.location.pathname}?world=${initialWorldId}`);
-
           try {
             setStatusDetail("Loading saved world…");
             const resp = await fetch(`/api/worlds/${initialWorldId}`, { cache: "no-store" });
@@ -443,13 +447,10 @@ export default function Home() {
 
     return () => {
       disposed = true;
-
       stopFakeProgress();
-
       try {
         cleanup?.();
       } catch {}
-
       try {
         if (rendererRef.current) {
           rendererRef.current.setAnimationLoop(null);
@@ -469,16 +470,14 @@ export default function Home() {
       vrButtonRef.current = null;
 
       try {
-        if (sceneRef.current && splatRootRef.current) {
-          sceneRef.current.remove(splatRootRef.current);
-        }
+        if (sceneRef.current && splatRootRef.current) sceneRef.current.remove(splatRootRef.current);
       } catch {}
       splatRootRef.current = null;
 
       cameraRef.current = null;
       sceneRef.current = null;
     };
-  }, []);
+  }, [splatResChoice]); // re-pick url on next load when selection changes
 
   async function copyShareLink() {
     try {
@@ -499,25 +498,16 @@ export default function Home() {
       setTimeout(() => setStatusDetail(""), 1200);
       return;
     }
-
-    try {
-      setStatusDetail("Downloading .spz…");
-      const name = makeFileNameFromUrl(url, lastWorldId ? `world_${lastWorldId}.spz` : "terranova_splat.spz");
-      await downloadUrl(url, name);
-      setStatusDetail("Download started.");
-      setTimeout(() => setStatusDetail(""), 1200);
-    } catch {
-      setStatusDetail("Download failed.");
-      setTimeout(() => setStatusDetail(""), 1500);
-    }
+    setStatusDetail("Downloading .spz…");
+    const name = makeFileNameFromUrl(
+      url,
+      lastWorldId ? `world_${lastWorldId}_${splatResChoice}.spz` : "terranova_splat.spz"
+    );
+    await downloadUrl(url, name);
+    setStatusDetail("Download started.");
+    setTimeout(() => setStatusDetail(""), 1200);
   }
 
-  /**
-   * FAST + RELIABLE:
-   * - Ask for Marble 0.1-mini
-   * - Poll /api/operations/:id until op.done === true
-   * - Use op.response directly (contains splat URLs)
-   */
   async function generate() {
     try {
       setBusy(true);
@@ -530,7 +520,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           text: prompt,
-          model: "Marble 0.1-mini",
+          model: modelChoice,
         }),
       });
 
@@ -552,7 +542,6 @@ export default function Home() {
 
         const op = await opResp.json();
 
-        // best-effort progress
         const progressRaw =
           op?.metadata?.progress ??
           op?.metadata?.percent ??
@@ -568,18 +557,15 @@ export default function Home() {
               : null;
 
         if (parsed != null && isFinite(parsed)) {
-          // If backend gives 0..1, normalize; if 0..100 use as-is.
           const p = parsed <= 1 ? parsed * 100 : parsed;
-          const cp = clamp(p, 0, 99); // hold 100 until done
+          const cp = clamp(p, 0, 99);
           setProgress(cp);
           setStatusDetail(`Generating… ${Math.round(cp)}%`);
         } else {
           setStatusDetail("Generating…");
         }
 
-        if (op?.error) {
-          throw new Error(op.error?.message || "World generation failed.");
-        }
+        if (op?.error) throw new Error(op.error?.message || "World generation failed.");
 
         if (op?.done) {
           const world = op?.response;
@@ -589,8 +575,7 @@ export default function Home() {
           if (worldId) {
             setLastWorldId(worldId);
             localStorage.setItem("lastWorld", worldId);
-            const newShare = `${window.location.origin}${window.location.pathname}?world=${worldId}`;
-            setShareUrl(newShare);
+            setShareUrl(`${window.location.origin}${window.location.pathname}?world=${worldId}`);
           }
 
           setStatus("Loading splat");
@@ -615,14 +600,25 @@ export default function Home() {
     }
   }
 
+  function startFakeProgress() {
+    stopFakeProgress();
+    setProgress(2);
+    let p = 2;
+    fakeProgressRef.current = window.setInterval(() => {
+      const remaining = 92 - p;
+      const step = Math.max(0.15, remaining * 0.02);
+      p = Math.min(92, p + step);
+      setProgress(p);
+    }, 140);
+  }
+
   const panelStyle: React.CSSProperties = {
     position: "absolute",
     top: 16,
     left: 16,
-    width: 520,
+    width: 560,
     maxWidth: "calc(100vw - 32px)",
-    background:
-      "linear-gradient(180deg, rgba(12,12,14,0.78), rgba(12,12,14,0.56))",
+    background: "linear-gradient(180deg, rgba(12,12,14,0.78), rgba(12,12,14,0.56))",
     border: "1px solid rgba(255,255,255,0.10)",
     padding: 14,
     borderRadius: 16,
@@ -644,13 +640,8 @@ export default function Home() {
     whiteSpace: "nowrap",
   });
 
-  const buttonStyle = (variant: "primary" | "secondary" | "danger" = "secondary"): React.CSSProperties => {
-    const bg =
-      variant === "primary"
-        ? "rgba(124,255,178,0.18)"
-        : variant === "danger"
-          ? "rgba(255,120,120,0.16)"
-          : "rgba(124,180,255,0.14)";
+  const buttonStyle = (variant: "primary" | "secondary" = "secondary"): React.CSSProperties => {
+    const bg = variant === "primary" ? "rgba(124,255,178,0.18)" : "rgba(124,180,255,0.14)";
     return {
       cursor: "pointer",
       padding: "10px 12px",
@@ -664,11 +655,20 @@ export default function Home() {
     };
   };
 
+  const selectStyle: React.CSSProperties = {
+    width: "100%",
+    padding: "10px 12px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.12)",
+    background: "rgba(0,0,0,0.28)",
+    color: "rgba(255,255,255,0.92)",
+    outline: "none",
+  };
+
   return (
     <>
       <div ref={mountRef} style={{ width: "100vw", height: "100vh" }} />
 
-      {/* HUD */}
       <div style={panelStyle}>
         {/* header */}
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -687,7 +687,7 @@ export default function Home() {
           </div>
         </div>
 
-        {/* progress bar */}
+        {/* progress */}
         {busy && (
           <div style={{ marginTop: 10 }}>
             <div
@@ -719,6 +719,35 @@ export default function Home() {
           {statusDetail ? <span style={{ opacity: 0.85 }}> — {statusDetail}</span> : null}
         </div>
 
+        {/* NEW: controls row */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 12 }}>
+          <div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>World model</div>
+            <select
+              value={modelChoice}
+              onChange={(e) => setModelChoice(e.target.value as ModelChoice)}
+              style={selectStyle}
+            >
+              <option value="Marble 0.1-mini">Marble 0.1-mini (fast)</option>
+              <option value="Marble 0.1-plus">Marble 0.1-plus (higher quality)</option>
+            </select>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 6 }}>Splat resolution</div>
+            <select
+              value={splatResChoice}
+              onChange={(e) => setSplatResChoice(e.target.value as SplatResChoice)}
+              style={selectStyle}
+            >
+              <option value="auto">Auto (best available)</option>
+              <option value="100k">100k (fastest)</option>
+              <option value="500k">500k (recommended)</option>
+              <option value="full_res">full_res (heaviest)</option>
+            </select>
+          </div>
+        </div>
+
         {/* chips */}
         <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
           {presets.map((p) => (
@@ -728,7 +757,7 @@ export default function Home() {
           ))}
         </div>
 
-        {/* prompt editor */}
+        {/* prompt */}
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
@@ -801,7 +830,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* subtle generation veil */}
       {busy && (
         <div
           style={{
